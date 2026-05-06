@@ -1,14 +1,16 @@
 # TSMusicBot — Docker Compose
-# 一键部署：docker-compose up -d
+# 一键部署：docker-compose pull && docker-compose up -d
 #
-# 所有依赖已内置（Node.js, FFmpeg, Opus 编码器）无需安装任何额外软件
-# FFmpeg 使用系统包管理器安装，确保容器内兼容性
+# 默认从 GitHub Container Registry 拉取预构建镜像（amd64 + arm64），
+# 无需本地编译，无需 Node.js / 构建工具链。
+# 镜像内置：Node.js, FFmpeg, Opus 编码器，原生模块均已交叉编译。
+#
+# 如需指定版本，把 :latest 换成具体 tag（例如 :1.4.0）。
+# 如需本地构建（开发或 fork），见底部注释。
 
 services:
   tsmusicbot:
-    build:
-      context: ../..
-      dockerfile: scripts/docker/Dockerfile
+    image: ghcr.io/zhangtianyao1/teamspeak-music-bot:latest
     container_name: tsmusicbot
     # Use host network so the bot can reach TS3 server on LAN
     # If your TS3 server is on the same machine, this is required
@@ -27,3 +29,12 @@ services:
 volumes:
   tsmusicbot-data:
     driver: local
+
+# ------------------------------------------------------------------
+# 本地构建（仅开发 / fork 场景使用）：
+# 把上面的 `image:` 行删掉，换成下面的 build 块即可。
+#
+#     build:
+#       context: ../..
+#       dockerfile: scripts/docker/Dockerfile
+# ------------------------------------------------------------------
