@@ -265,11 +265,22 @@ export function createPlayerRouter(
         first = queue.play();
       }
 
-      if (first) {
-        await bot.resolveAndPlay(first);
+      // If the first picked song can't resolve (e.g., QQ song with no
+      // streaming entitlement → result 104003), fall back to the same
+      // retry-skip behavior playNext uses for trackEnd auto-advance.
+      // Otherwise the bot would sit silently on a dead song.
+      let started = first ? await bot.resolveAndPlay(first) : false;
+      if (first && !started) {
+        await bot.playNext();
+        started = !!queue.current();
       }
 
-      res.json({ message: `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}` });
+      const playing = queue.current();
+      if (started && playing) {
+        res.json({ message: `Loaded ${songs.length} songs. Now playing: ${playing.name}` });
+      } else {
+        res.json({ message: `Loaded ${songs.length} songs but none were playable (likely copyright/region restrictions).` });
+      }
     } catch (err) {
       logger.error({ err }, "Play playlist failed");
       res.status(500).json({ error: (err as Error).message });

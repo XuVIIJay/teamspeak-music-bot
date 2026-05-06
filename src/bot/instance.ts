@@ -734,7 +734,13 @@ export class BotInstance extends EventEmitter {
     ].join("\n");
   }
 
-  private async playNext(): Promise<void> {
+  /**
+   * Advance the queue and play the next song. If the resolved URL fails
+   * (e.g., copyright/region restrictions for QQ), skips up to 3 more
+   * songs looking for a playable one. Public so REST endpoints that
+   * seed the queue can fall back to this retry-skip behavior.
+   */
+  async playNext(): Promise<void> {
     if (this.isAdvancing || !this.connected) return;
     this.isAdvancing = true;
     try {
