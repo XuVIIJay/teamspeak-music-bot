@@ -58,6 +58,12 @@ export class PlayQueue {
     }
     this.playedIndices = newPlayed;
 
+    // Same shift logic for history — drop entries pointing at the
+    // removed song; shift entries > index down by 1.
+    this.history = this.history
+      .filter((idx) => idx !== index)
+      .map((idx) => (idx > index ? idx - 1 : idx));
+
     return removed;
   }
 
@@ -65,11 +71,13 @@ export class PlayQueue {
     this.songs = [];
     this.currentIndex = -1;
     this.playedIndices.clear();
+    this.history = [];
   }
 
   play(): QueuedSong | null {
     if (this.songs.length === 0) return null;
     this.playedIndices.clear();
+    this.history = [];
     this.currentIndex = 0;
     this.playedIndices.add(0);
     return this.songs[0];
@@ -77,7 +85,7 @@ export class PlayQueue {
 
   playAt(index: number): QueuedSong | null {
     if (index < 0 || index >= this.songs.length) return null;
-    this.playedIndices.clear();
+    this.pushHistory(this.currentIndex);
     this.currentIndex = index;
     this.playedIndices.add(index);
     return this.songs[index];
@@ -90,10 +98,12 @@ export class PlayQueue {
       case PlayMode.Sequential: {
         const nextIndex = this.currentIndex + 1;
         if (nextIndex >= this.songs.length) return null;
+        this.pushHistory(this.currentIndex);
         this.currentIndex = nextIndex;
         return this.songs[nextIndex];
       }
       case PlayMode.Loop: {
+        this.pushHistory(this.currentIndex);
         this.currentIndex = (this.currentIndex + 1) % this.songs.length;
         return this.songs[this.currentIndex];
       }
@@ -105,12 +115,14 @@ export class PlayQueue {
         if (unplayed.length === 0) return null;
         const nextIndex =
           unplayed[Math.floor(Math.random() * unplayed.length)];
+        this.pushHistory(this.currentIndex);
         this.currentIndex = nextIndex;
         this.playedIndices.add(nextIndex);
         return this.songs[nextIndex];
       }
       case PlayMode.RandomLoop: {
         if (this.songs.length === 1) {
+          this.pushHistory(this.currentIndex);
           this.currentIndex = 0;
           return this.songs[0];
         }
@@ -118,6 +130,7 @@ export class PlayQueue {
         do {
           idx = Math.floor(Math.random() * this.songs.length);
         } while (idx === this.currentIndex);
+        this.pushHistory(this.currentIndex);
         this.currentIndex = idx;
         return this.songs[idx];
       }
@@ -126,9 +139,27 @@ export class PlayQueue {
 
   prev(): QueuedSong | null {
     if (this.songs.length === 0) return null;
+
+    // Preferred: pop from the back-stack so prev means "the song I
+    // actually played before this one," not "the previous array slot."
+    while (this.history.length > 0) {
+      const idx = this.history.pop()!;
+      if (idx >= 0 && idx < this.songs.length) {
+        this.currentIndex = idx;
+        this.playedIndices.add(idx);
+        return this.songs[idx];
+      }
+      // Stale entry (song removed) — keep popping.
+    }
+
+    // Fallback: no history to walk back through. In Sequential we
+    // can still meaningfully step the index backward; in random
+    // modes there's nothing useful to return.
+    if (this.mode === PlayMode.Random || this.mode === PlayMode.RandomLoop) {
+      return null;
+    }
     const prevIndex = this.currentIndex - 1;
     if (prevIndex < 0) {
-      // In Sequential mode, don't wrap around
       if (this.mode === PlayMode.Sequential) return null;
       this.currentIndex = this.songs.length - 1;
     } else {
@@ -163,6 +194,7 @@ export class PlayQueue {
   setMode(mode: PlayMode): void {
     this.mode = mode;
     this.playedIndices.clear();
+    this.history = [];
     if (this.currentIndex >= 0) {
       this.playedIndices.add(this.currentIndex);
     }

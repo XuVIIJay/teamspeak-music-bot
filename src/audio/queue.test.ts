@@ -261,4 +261,107 @@ describe("PlayQueue", () => {
     queue.playAt(2);
     expect(queue.current()?.id).toBe("3");
   });
+
+  describe("history-aware prev", () => {
+    it("walks back through played indices in random mode", () => {
+      queue.setMode(PlayMode.Random);
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.add(makeSong("c"));
+      queue.add(makeSong("d"));
+      queue.add(makeSong("e"));
+
+      // Force a deterministic random sequence: a → c → e
+      queue.playAt(0);
+      queue.playAt(2);
+      queue.playAt(4);
+      expect(queue.current()?.id).toBe("e");
+
+      // prev pops back through history: e → c → a
+      expect(queue.prev()?.id).toBe("c");
+      expect(queue.prev()?.id).toBe("a");
+    });
+
+    it("returns null when history is empty in random mode", () => {
+      queue.setMode(PlayMode.Random);
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.playAt(0);
+      // No further moves → history is empty (only 'a' is current, never pushed)
+      expect(queue.prev()).toBeNull();
+    });
+
+    it("preserves sequential prev when history is empty", () => {
+      queue.setMode(PlayMode.Sequential);
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.add(makeSong("c"));
+      queue.play();
+      queue.next(); // currentIndex = 1
+      // Sequential next() pushed 0 to history → prev pops back to 0
+      expect(queue.prev()?.id).toBe("a");
+    });
+
+    it("clears history on play()", () => {
+      queue.setMode(PlayMode.Random);
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.playAt(0);
+      queue.playAt(1);
+      queue.play(); // resets to index 0 and clears history
+      expect(queue.prev()).toBeNull();
+    });
+
+    it("clears history on clear()", () => {
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.play();
+      queue.next();
+      queue.clear();
+      queue.add(makeSong("c"));
+      queue.play();
+      // History was wiped — no prev path available beyond index 0
+      expect(queue.prev()).toBeNull();
+    });
+
+    it("clears history on setMode()", () => {
+      queue.setMode(PlayMode.Sequential);
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.play();
+      queue.next();
+      // Mode change resets context
+      queue.setMode(PlayMode.Random);
+      expect(queue.prev()).toBeNull();
+    });
+
+    it("drops history entries pointing at a removed song", () => {
+      queue.setMode(PlayMode.Random);
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.add(makeSong("c"));
+      queue.playAt(0);
+      queue.playAt(1); // history: [0]
+      queue.playAt(2); // history: [0, 1]
+      // Remove song at index 1 → history entry 1 dropped
+      queue.remove(1);
+      // queue is now [a, c], history should be [0]
+      // current was at 2 → after remove shifts to 1 → song "c"
+      expect(queue.current()?.id).toBe("c");
+      expect(queue.prev()?.id).toBe("a");
+    });
+
+    it("does not push to history on prev itself", () => {
+      queue.setMode(PlayMode.Random);
+      queue.add(makeSong("a"));
+      queue.add(makeSong("b"));
+      queue.add(makeSong("c"));
+      queue.playAt(0);
+      queue.playAt(1);
+      queue.playAt(2); // history: [0, 1]
+      queue.prev();    // pops 1, history: [0]
+      queue.prev();    // pops 0, history: []
+      expect(queue.prev()).toBeNull(); // no fallback target in random mode
+    });
+  });
 });
