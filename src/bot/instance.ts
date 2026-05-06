@@ -498,13 +498,17 @@ export class BotInstance extends EventEmitter {
   }
 
   private async cmdPrev(): Promise<string> {
-    const prev = this.queue.prev();
-    if (prev) {
+    // Retry-skip up to 4 attempts: history can include failed songs
+    // that playNext's auto-advance retry-skipped past, so a single
+    // prev would otherwise land on an unplayable song and leave the
+    // queue's currentIndex stuck mid-failure.
+    for (let i = 0; i < 4; i++) {
+      const prev = this.queue.prev();
+      if (!prev) return "No previous song";
       const ok = await this.resolveAndPlay(prev);
-      if (!ok) return "Cannot play previous song";
-      return `Now playing: ${prev.name} - ${prev.artist}`;
+      if (ok) return `Now playing: ${prev.name} - ${prev.artist}`;
     }
-    return "No previous song";
+    return "Cannot play any previous songs (all failed to resolve)";
   }
 
   private cmdVol(cmd: ParsedCommand): string {

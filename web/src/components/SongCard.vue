@@ -156,6 +156,15 @@ function formatDuration(seconds: number): string {
   transition: opacity var(--transition-fast);
 }
 
+// Touch devices have no :hover, so the parent-hover-reveals-actions
+// pattern leaves all action buttons invisible. Always show on coarse-
+// pointer (touch) inputs — this is also where bigger tap targets matter.
+@media (pointer: coarse) {
+  .song-actions {
+    opacity: 1;
+  }
+}
+
 .action-btn {
   font-size: 18px;
   padding: 4px;
