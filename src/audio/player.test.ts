@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { buildFfmpegArgs } from "./player.js";
+import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildFfmpegArgs, shouldUsePowerShellDownload, cleanupTempDir } from "./player.js";
 
 function getHeadersArg(args: string[]): string {
   const idx = args.indexOf("-headers");
@@ -56,6 +59,16 @@ describe("buildFfmpegArgs", () => {
     expect(args).not.toContain("-ss");
   });
 
+  it("omits HTTP-only flags when input is a local file path", () => {
+    const args = buildFfmpegArgs("C:/temp/song.mp3", 0);
+    expect(args).not.toContain("-reconnect");
+    expect(args).not.toContain("-reconnect_on_network_error");
+    expect(args).not.toContain("-reconnect_on_http_error");
+    expect(args).not.toContain("-headers");
+    expect(args).toContain("-i");
+    expect(args[args.indexOf("-i") + 1]).toBe("C:/temp/song.mp3");
+  });
+
   it("ends args with the input URL and PCM output spec", () => {
     const url = "https://example.com/song.mp3";
     const args = buildFfmpegArgs(url, 0);
@@ -64,5 +77,59 @@ describe("buildFfmpegArgs", () => {
     expect(args).toContain("-f");
     expect(args).toContain("s16le");
     expect(args[args.length - 1]).toBe("-");
+  });
+});
+
+describe("shouldUsePowerShellDownload", () => {
+  const jdymusicUrl =
+    "http://m801.music.126.net/20260507/abc/jdymusic/obj/xyz/song.mp3?vuutv=tok";
+  const newCdnUrl =
+    "http://m801.music.126.net/20260507/abc/jd-musicrep-ts/obj/xyz/song.mp3?vuutv=tok";
+  const ymusicUrl =
+    "http://m801.music.126.net/20260507/abc/ymusic/obj/xyz/song.mp3?vuutv=tok";
+
+  it("returns true for /jdymusic/ URL on win32", () => {
+    expect(shouldUsePowerShellDownload(jdymusicUrl, "win32")).toBe(true);
+  });
+
+  it("returns false for /jdymusic/ URL on linux", () => {
+    expect(shouldUsePowerShellDownload(jdymusicUrl, "linux")).toBe(false);
+  });
+
+  it("returns false for /jdymusic/ URL on darwin", () => {
+    expect(shouldUsePowerShellDownload(jdymusicUrl, "darwin")).toBe(false);
+  });
+
+  it("returns false for new-format /jd-musicrep-ts/ URL on win32", () => {
+    expect(shouldUsePowerShellDownload(newCdnUrl, "win32")).toBe(false);
+  });
+
+  it("returns false for /ymusic/ URL on win32", () => {
+    expect(shouldUsePowerShellDownload(ymusicUrl, "win32")).toBe(false);
+  });
+
+  it("returns false for unrelated URLs", () => {
+    expect(shouldUsePowerShellDownload("https://example.com/x.mp3", "win32")).toBe(false);
+  });
+});
+
+describe("cleanupTempDir", () => {
+  it("removes a directory and its contents", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tsbot-test-"));
+    writeFileSync(join(dir, "song.mp3"), "fake-bytes");
+    expect(existsSync(dir)).toBe(true);
+    cleanupTempDir(dir);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("does not throw when directory does not exist", () => {
+    const missing = join(tmpdir(), "tsbot-test-does-not-exist-xyz");
+    expect(() => cleanupTempDir(missing)).not.toThrow();
+  });
+
+  it("does not throw when called twice", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tsbot-test-"));
+    cleanupTempDir(dir);
+    expect(() => cleanupTempDir(dir)).not.toThrow();
   });
 });
