@@ -25,6 +25,7 @@ export class BotProfileManager {
   private logger: Logger;
   private config: ProfileConfig;
   private defaultNickname: string;
+  private customAvatar: Buffer | null = null;
 
   /** Per-feature permission-denied flags. Reset on reconnect. */
   private permDenied = {
@@ -57,6 +58,11 @@ export class BotProfileManager {
   }
 
   // --- Public API ---
+
+  /** Set/clear the persistent idle avatar. Pass null to remove. */
+  setCustomAvatar(buffer: Buffer | null): void {
+    this.customAvatar = buffer;
+  }
 
   /**
    * Called when a new song starts playing (song != null) or playback
@@ -99,6 +105,10 @@ export class BotProfileManager {
       channelDesc: false,
       nowPlayingMsg: false,
     };
+    if (!this.config.avatarEnabled && this.customAvatar) {
+      const gen = this.generation;
+      void this.applyIdleAvatar(gen);
+    }
   }
 
   getConfig(): ProfileConfig {
@@ -171,6 +181,10 @@ export class BotProfileManager {
   }
 
   private async clearAvatar(gen: number): Promise<void> {
+    if (this.customAvatar && this.customAvatar.length > 0) {
+      await this.applyIdleAvatar(gen);
+      return;
+    }
     try {
       await this.withTimeout(
         this.tsClient.fileTransferDeleteFile(0n, ["/avatar"]),
@@ -179,10 +193,21 @@ export class BotProfileManager {
     } catch {
       // File may not exist or transfer timed out — that's fine
     }
-    // Bail if a newer song started while we were deleting
     if (this.generation !== gen) return;
     try {
       await this.tsClient.sendCommandNoWait("clientupdate client_flag_avatar=");
+    } catch (err) {
+      this.handleFeatureError("avatar", err);
+    }
+  }
+
+  private async applyIdleAvatar(gen: number): Promise<void> {
+    if (!this.customAvatar || this.customAvatar.length === 0) return;
+    if (this.permDenied.avatar) return;
+    try {
+      await this.withTimeout(this.doAvatarUpload(this.customAvatar), FILE_TRANSFER_TIMEOUT_MS);
+      if (this.generation !== gen) return;
+      this.logger.info({ bytes: this.customAvatar.length }, "Idle (custom) avatar applied");
     } catch (err) {
       this.handleFeatureError("avatar", err);
     }
