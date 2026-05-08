@@ -1,11 +1,8 @@
 import { EventEmitter } from "node:events";
 import {
   TS3Client,
-  escapeTS3,
   type TS3ClientOptions,
   type TS3TextMessage,
-  type ClientInfo,
-  type ClientMovedEvent,
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
@@ -16,6 +13,7 @@ import {
   type ParsedCommand,
 } from "./commands.js";
 import type { Logger } from "../logger.js";
+import { askAI } from "./ai.js";
 import type { BotDatabase, ProfileConfig } from "../data/database.js";
 import type { BotConfig } from "../data/config.js";
 import { BotProfileManager } from "./profile.js";
@@ -71,9 +69,6 @@ export class BotInstance extends EventEmitter {
   private channelUserCount = 0;
   private profileManager: BotProfileManager;
   private isFmMode = false;
-  private suppressWelcomeUntil = 0;
-  private defaultChannelName: string;
-  private defaultChannelId: bigint = 0n;
 
   constructor(options: BotInstanceOptions) {
     super();
@@ -91,7 +86,6 @@ export class BotInstance extends EventEmitter {
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
     this.queue = new PlayQueue();
-    this.defaultChannelName = options.tsOptions.defaultChannel ?? "";
 
     const profileConfig = this.database.getProfileConfig(this.id);
     this.profileManager = new BotProfileManager(
@@ -157,171 +151,9 @@ export class BotInstance extends EventEmitter {
       this.emit("disconnected");
     });
 
-    // 机器人切换频道后 3 秒内不发送欢迎
-    this.tsClient.on("channelChanged", () => {
-      this.suppressWelcomeUntil = Date.now() + 3000;
-    });
-
-    // connected 事件中缓存默认频道 ID
     this.tsClient.on("connected", () => {
       this._startIdlePoller();
-      this.tsClient.getDefaultChannelId().then((id) => {
-        this.defaultChannelId = id;
-      }).catch(() => {});
     });
-
-    // 监听 clientEnter（用户进入机器人所在频道或默认频道）
-    this.tsClient.on("clientEnter", (info: ClientInfo) => {
-      this._handleClientEnter(info).catch((err) => {
-        this.logger.error({ err }, "Welcome error on clientEnter");
-      });
-    });
-
-    // 监听 clientMoved（用户切换频道）
-    this.tsClient.on("clientMoved", async (event: ClientMovedEvent) => {
-      await this._handleClientMoved(event);
-    });
-  }
-
-  // ─────────────────────────────────────────────
-  //  clientEnter 处理
-  // ─────────────────────────────────────────────
-
-  private async _handleClientEnter(info: ClientInfo): Promise<void> {
-    if (Date.now() < this.suppressWelcomeUntil) return;
-    if (!this.profileManager.getConfig().welcomeEnabled) return;
-
-    // 验证用户是否真的在机器人当前频道
-    const clients = await this.tsClient.getClientsInChannel();
-    const isInMyChannel = clients.some((c) => c.id === info.id);
-
-    if (!isInMyChannel) {
-      // 即使不在本频道，也检查用户是否进入了默认频道
-      if (this.defaultChannelId === 0n) {
-        this.defaultChannelId = await this.tsClient.getDefaultChannelId();
-      }
-      if (this.defaultChannelId !== 0n) {
-        try {
-          const userInfo = await this.tsClient.findClientInfo(info.id);
-          if (userInfo && userInfo.channelID === this.defaultChannelId) {
-            await this._sendServerWelcome(info.nickname);
-          }
-        } catch (err) {
-          this.logger.error({ err }, "clientEnter fallback error");
-        }
-      }
-      return;
-    }
-
-    // 频道欢迎（不依赖 myChannelId，直接用 info 中的频道 ID）
-    const channelId = info.channelID !== 0n
-      ? info.channelID
-      : await this.tsClient.getMyChannelId();
-    await this._sendChannelWelcome(info.nickname, channelId);
-
-    // 服务器欢迎：仅当本机器人所在频道 == 默认频道
-    if (this.defaultChannelId === 0n) {
-      this.defaultChannelId = await this.tsClient.getDefaultChannelId();
-    }
-    if (this.defaultChannelId !== 0n && channelId === this.defaultChannelId) {
-      await this._sendServerWelcome(info.nickname);
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  //  clientMoved 处理
-  // ─────────────────────────────────────────────
-
-  private async _handleClientMoved(
-    event: ClientMovedEvent
-  ): Promise<void> {
-    if (!this.profileManager.getConfig().welcomeEnabled) return;
-    const myChannelId = await this.tsClient.getMyChannelId();
-    let enteredChannelId = event.targetChannelID;
-
-    // 如果底层库返回 0，通过 listClients 查找用户实际所在频道
-    if (enteredChannelId === 0n) {
-      const found = await this.tsClient.findClientInfo(event.id);
-      if (found) enteredChannelId = found.channelID;
-    }
-
-    // 查找用户昵称
-    let nickname: string | null = null;
-
-    // 情况 A: 用户可能进入本机器人频道
-    const sameChannel = enteredChannelId !== 0n
-      ? enteredChannelId === myChannelId
-      : true; // 无法确定频道 ID 时，尝试欢迎
-    if (sameChannel) {
-      const channelClients = await this.tsClient.getClientsInChannel();
-      const moved = channelClients.find((c) => c.id === event.id);
-      if (moved) nickname = moved.nickname;
-      if (!nickname) {
-        const info = await this.tsClient.findClientInfo(event.id);
-        if (info) nickname = info.nickname;
-      }
-    }
-
-    // 情况 B: 用户进入默认频道 → 服务器欢迎
-    const isDefaultEnter = this.defaultChannelId !== 0n
-      && enteredChannelId === this.defaultChannelId;
-
-    if (isDefaultEnter && !nickname) {
-      const info = await this.tsClient.findClientInfo(event.id);
-      if (info) nickname = info.nickname;
-    }
-
-    if (!nickname) return;
-
-    // 频道欢迎
-    if (sameChannel) {
-      await this._sendChannelWelcome(nickname, myChannelId);
-    }
-
-    // 服务器欢迎
-    if (isDefaultEnter) {
-      await this._sendServerWelcome(nickname);
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  //  发送频道欢迎消息
-  // ─────────────────────────────────────────────
-
-  private async _sendChannelWelcome(
-    nickname: string, channelId: bigint
-  ): Promise<void> {
-    const channelName = await this.tsClient.getChannelName(channelId)
-      || this.defaultChannelName || "当前频道";
-
-    const msg = `🎵欢迎🎈${nickname}🎈加入${channelName}，🎶 !help 获取播放指令，玩的开心哦🍬`;
-
-    try {
-      await this.tsClient.execCommand(
-        `sendtextmessage targetmode=2 target=0 msg=${escapeTS3(msg)}`
-      );
-    } catch (err) {
-      this.logger.error({ err }, "Failed to send channel welcome");
-    }
-  }
-
-  // ─────────────────────────────────────────────
-  //  发送服务器欢迎消息
-  // ─────────────────────────────────────────────
-
-  private async _sendServerWelcome(nickname: string): Promise<void> {
-    try {
-      const serverName = await this.tsClient.getServerName();
-
-      const msg = `🎉欢迎🎈${nickname}🎈加入${serverName}！🎵使用💬!ai 与我对话聊天哦✨`
-        + `\n🔔  在下方选择频道聊天框互动吧  🔔`;
-
-      await this.tsClient.execCommand(
-        `sendtextmessage targetmode=3 target=0 msg=${escapeTS3(msg)}`
-      );
-    } catch (err) {
-      this.logger.error({ err }, "Failed to send server welcome");
-    }
   }
 
   async connect(): Promise<void> {
@@ -499,6 +331,8 @@ export class BotInstance extends EventEmitter {
         return this.cmdMove(cmd);
       case "follow":
         return this.cmdFollow(msg);
+      case "ai":
+        return this.cmdAi(cmd);
       case "help":
         return this.cmdHelp();
       default:
@@ -807,27 +641,9 @@ export class BotInstance extends EventEmitter {
   }
 
   private async cmdAlbum(cmd: ParsedCommand): Promise<string> {
-    if (!cmd.args) return "Usage: !album <album name or ID>";
+    if (!cmd.args) return "Usage: !album <album ID>";
     const provider = this.getProvider(cmd.flags);
-
-    const id = this.extractId(cmd.args);
-    const isNumericId = /^\d+$/.test(cmd.args.trim());
-
-    let albumId: string;
-
-    if (isNumericId || id !== cmd.args) {
-      // Input is a numeric ID or URL containing an ID — use directly
-      albumId = id;
-    } else {
-      // Name-based search
-      const result = await provider.search(cmd.args);
-      const albums = result.albums ?? [];
-      if (albums.length === 0)
-        return `No albums found for: ${cmd.args}`;
-      albumId = albums[0].id;
-    }
-
-    const songs = await provider.getAlbumSongs(albumId);
+    const songs = await provider.getAlbumSongs(cmd.args);
     if (songs.length === 0) return "Album is empty or not found";
 
     this.queue.clear();
@@ -866,7 +682,7 @@ export class BotInstance extends EventEmitter {
   private async cmdArtist(cmd: ParsedCommand): Promise<string> {
     if (!cmd.args) return "Usage: !artist <artist name>";
     const provider = this.getProvider(cmd.flags);
-    const result = await provider.search(cmd.args, 100);
+    const result = await provider.search(cmd.args, 50);
     if (result.songs.length === 0)
       return `No results found for artist: ${cmd.args}`;
 
@@ -950,35 +766,95 @@ export class BotInstance extends EventEmitter {
     return "Following you to your channel";
   }
 
+  private async cmdAi(cmd: ParsedCommand): Promise<string> {
+    const prompt = cmd.args;
+    if (!prompt) return "Usage: !ai <your question>";
+
+    const p = this.config.commandPrefix;
+    const systemPrompt = [
+      "你是TeamSpeak音乐播放机器人，回答尽量用一句话完成，不要分段长文本，不要输出无关内容。",
+      "你可以通过 [CMD]命令[/CMD] 来执行播放控制，[CMD] 必须放在回复的开头，一次最多一个命令。",
+      '【重要】只有用户直接要求执行播放操作（如"播放"/"下一首"/"暂停"等）时才使用 [CMD]；',
+      '如果用户是在问"怎么/如何/怎样"之类的问题，直接文字回答即可，不要加 [CMD]。',
+      "例如：",
+      '- 用户说"播放周杰伦的歌" → [CMD]!play -q 周杰伦[/CMD] 正在为您播放',
+      '- 用户说"怎么播放歌曲" → 直接回答：发送 !play -q <歌名> 即可播放',
+      '- 用户说"下一首" → [CMD]!next[/CMD] 已切换',
+      '- 用户说"暂停" → [CMD]!pause[/CMD] 已暂停',
+      "可用命令（所有音乐搜索必须加 -q 使用QQ音乐）：",
+      `${p}play -q <歌名> 搜索并播放QQ音乐单曲`,
+      `${p}artist -q <歌手名> 循环播放该歌手的QQ音乐歌曲`,
+      `${p}playnext -q <歌名> 插队下一首播放`,
+      `${p}pn -q <歌名> 插队下一首播放`,
+      `${p}next 下一曲`,
+      `${p}prev 上一曲`,
+      `${p}pause 暂停播放`,
+      `${p}resume 恢复播放`,
+      `${p}stop 停止并清空队列`,
+      `${p}vol <0-100> 设置音量`,
+      `${p}queue 查看播放列表`,
+      `${p}mode seq|loop|random|rloop 切换播放模式`,
+      `${p}add -q <歌名> 添加到队列尾部`,
+      `${p}lyrics 查看当前歌词`,
+      `${p}fm 开启FM随机播放`,
+      `${p}playlist -q <歌单名> 加载QQ音乐歌单`,
+      "注意：只有用户明确要求执行播放操作时才用 [CMD]，问问题/求帮助直接文字回答。"
+    ].join("\n");
+
+    try {
+      const reply = await askAI(prompt, this.config.deepseekApiKey, systemPrompt);
+
+      // 尝试提取 [CMD]...[/CMD]
+      const cmdMatch = reply.match(/\[CMD\](.+?)\[\/CMD\]/);
+      if (cmdMatch) {
+        const cmdStr = cmdMatch[1].trim();
+        const parsed = parseCommand(cmdStr, this.config.commandPrefix, this.config.commandAliases);
+        // 防止 AI 递归调用 !ai
+        if (parsed && parsed.name !== "ai") {
+          try {
+            await this.executeCommand(parsed);
+          } catch (cmdErr) {
+            this.logger.error({ err: cmdErr, cmd: cmdStr }, "AI command execution failed");
+          }
+        }
+      }
+
+      // 去掉 [CMD] 标签后返回纯文本
+      return reply.replace(/\[CMD\].+?\[\/CMD\]/g, "").trim();
+    } catch (err) {
+      this.logger.error({ err }, "AI error");
+      return "AI请求失败";
+    }
+  }
+
   private cmdHelp(): string {
     const p = this.config.commandPrefix;
     return [
-      "音乐机器人控制命令：",
-      `${p}play <song>  — 搜索歌曲并播放（网易云）`,
-      `${p}play -q <song>  — 搜索歌曲并播放（QQ音乐）`,
-      `${p}play -b <song>  — 搜索并播放（bilibili）`,
-      `${p}play -y <song>  — 搜索并播放（YouTube）`,
-      `${p}add <song>  — 添加歌曲到队尾`,
-      `${p}playnext <song> — 插队下一首播放`,
-      `${p}pn <song> — 插队下一首播放（简化命令）`,
-      `${p}pause/resume  — 暂停/恢复播放`,
-      `${p}next/prev   — 下一曲/上一曲`,
-      `${p}stop  — 暂停播放并清空播放队列`,
-      `${p}vol <0-100>  — 设置音量`,
-      `${p}queue  — 查看播放队列`,
-      `${p}remove <pos>  — 移除队列中指定位置的歌曲（配合 ${p}queue 使用）`,
-      `${p}mode <seq|loop|random|rloop>  — 播放模式（顺序|循环|随机|随机循环）`,
-      `${p}playlist <name or id>  — 通过名称或者歌单id加载歌单（网易云）`,
-      `${p}playlist -q <name or id>  — 通过名称或者歌单id加载歌单（QQ音乐）`,
-      `${p}album <id>  — 加载专辑`,
-      `${p}fm  — 个人电台（网易云）`,
-      `${p}artist <name>  — 循环播放歌手的歌曲（网易云）`,
-      `${p}artist -q <name>  — 循环播放歌手的歌曲（QQ音乐）`,
-      `${p}vote  — 投票跳过当前歌曲`,
-      `${p}lyrics  — 显示歌词`,
-      `${p}now  — 显示当前歌曲信息`,
-      `${p}ai <内容>  — 与AI对话`,
-      `${p}help  — 帮助信息`,
+      "TSMusicBot Commands:",
+      `${p}play <song>  — Search and play`,
+      `${p}play -q <song> — Search from QQ Music`,
+      `${p}play -b <song> — Search from BiliBili`,
+      `${p}play -y <song> — Search from YouTube (yt-dlp)`,
+      `${p}add <song>   — Add to queue`,
+      `${p}playnext <song> — Insert as next song (alias: ${p}pn)`,
+      `${p}pause/resume — Pause/resume`,
+      `${p}next/prev    — Next/previous`,
+      `${p}stop         — Stop and clear queue`,
+      `${p}vol <0-100>  — Set volume`,
+      `${p}queue        — Show queue`,
+      `${p}remove <pos> — Remove song at position (see ${p}queue)`,
+      `${p}mode <seq|loop|random|rloop> — Play mode`,
+      `${p}playlist <name or id> — Load playlist by name or ID`,
+      `${p}playlist -q <name or id> — Load playlist from QQ Music`,
+      `${p}album <id>   — Load album`,
+      `${p}fm           — Personal FM (NetEase)`,
+      `${p}artist <name> — Play songs by artist (loop)`,
+      `${p}artist -q <name> — Artist loop from QQ Music`,
+      `${p}vote         — Vote to skip`,
+      `${p}lyrics       — Show lyrics`,
+      `${p}now          — Current song info`,
+      `${p}ai <content> — Chat with AI`,
+      `${p}help         — This help message`,
     ].join("\n");
   }
 
