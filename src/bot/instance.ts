@@ -13,6 +13,7 @@ import {
   type ParsedCommand,
 } from "./commands.js";
 import type { Logger } from "../logger.js";
+import { askAI } from "./ai.js";
 import type { BotDatabase, ProfileConfig } from "../data/database.js";
 import type { BotConfig } from "../data/config.js";
 import { BotProfileManager } from "./profile.js";
@@ -330,6 +331,8 @@ export class BotInstance extends EventEmitter {
         return this.cmdMove(cmd);
       case "follow":
         return this.cmdFollow(msg);
+      case "ai":
+        return this.cmdAi(cmd);
       case "help":
         return this.cmdHelp();
       default:
@@ -781,6 +784,67 @@ export class BotInstance extends EventEmitter {
     return "Following you to your channel";
   }
 
+  private async cmdAi(cmd: ParsedCommand): Promise<string> {
+    const prompt = cmd.args;
+    if (!prompt) return "Usage: !ai <your question>";
+
+    const p = this.config.commandPrefix;
+    const systemPrompt = [
+      "你是TeamSpeak音乐播放机器人，回答尽量用一句话完成，不要分段长文本，不要输出无关内容。",
+      "你可以通过 [CMD]命令[/CMD] 来执行播放控制，[CMD] 必须放在回复的开头，一次最多一个命令。",
+      '【重要】只有用户直接要求执行播放操作（如"播放"/"下一首"/"暂停"等）时才使用 [CMD]；',
+      '如果用户是在问"怎么/如何/怎样"之类的问题，直接文字回答即可，不要加 [CMD]。',
+      "例如：",
+      '- 用户说"播放周杰伦的歌" → [CMD]!play -q 周杰伦[/CMD] 正在为您播放',
+      '- 用户说"怎么播放歌曲" → 直接回答：发送 !play -q <歌名> 即可播放',
+      '- 用户说"下一首" → [CMD]!next[/CMD] 已切换',
+      '- 用户说"暂停" → [CMD]!pause[/CMD] 已暂停',
+      "可用命令（所有音乐搜索必须加 -q 使用QQ音乐）：",
+      `${p}play -q <歌名> 搜索并播放QQ音乐单曲`,
+      `${p}artist -q <歌手名> 循环播放该歌手的QQ音乐歌曲`,
+      `${p}playnext -q <歌名> 插队下一首播放`,
+      `${p}pn -q <歌名> 插队下一首播放`,
+      `${p}next 下一曲`,
+      `${p}prev 上一曲`,
+      `${p}pause 暂停播放`,
+      `${p}resume 恢复播放`,
+      `${p}stop 停止并清空队列`,
+      `${p}vol <0-100> 设置音量`,
+      `${p}queue 查看播放列表`,
+      `${p}mode seq|loop|random|rloop 切换播放模式`,
+      `${p}add -q <歌名> 添加到队列尾部`,
+      `${p}lyrics 查看当前歌词`,
+      `${p}fm 开启FM随机播放`,
+      `${p}playlist -q <歌单名> 加载QQ音乐歌单`,
+      "注意：只有用户明确要求执行播放操作时才用 [CMD]，问问题/求帮助直接文字回答。"
+    ].join("\n");
+
+    try {
+      const reply = await askAI(prompt, systemPrompt);
+
+      // 尝试提取 [CMD]...[/CMD]
+      const cmdMatch = reply.match(/\[CMD\](.+?)\[\/CMD\]/);
+      if (cmdMatch) {
+        const cmdStr = cmdMatch[1].trim();
+        const parsed = parseCommand(cmdStr, this.config.commandPrefix, this.config.commandAliases);
+        // 防止 AI 递归调用 !ai
+        if (parsed && parsed.name !== "ai") {
+          try {
+            await this.executeCommand(parsed);
+          } catch (cmdErr) {
+            this.logger.error({ err: cmdErr, cmd: cmdStr }, "AI command execution failed");
+          }
+        }
+      }
+
+      // 去掉 [CMD] 标签后返回纯文本
+      return reply.replace(/\[CMD\].+?\[\/CMD\]/g, "").trim();
+    } catch (err) {
+      this.logger.error({ err }, "AI error");
+      return "AI请求失败";
+    }
+  }
+
   private cmdHelp(): string {
     const p = this.config.commandPrefix;
     return [
@@ -807,6 +871,7 @@ export class BotInstance extends EventEmitter {
       `${p}vote         — Vote to skip`,
       `${p}lyrics       — Show lyrics`,
       `${p}now          — Current song info`,
+      `${p}ai <content> — Chat with AI`,
       `${p}help         — This help message`,
     ].join("\n");
   }
