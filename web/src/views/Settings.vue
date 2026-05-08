@@ -1152,6 +1152,30 @@
         </div>
       </div>
     </section>
+
+    <!-- AI Settings -->
+    <section class="settings-section">
+      <h2 class="section-title">AI 设置</h2>
+      <div class="setting-row">
+        <div class="setting-label">
+          <Icon icon="mdi:robot" class="setting-icon" />
+          <div>
+            <div>DeepSeek API Key</div>
+            <div style="font-size:12px; opacity:0.6; margin-top:2px">用于 !ai 对话功能，从 platform.deepseek.com 获取</div>
+          </div>
+        </div>
+        <div class="prefix-input-wrap" style="flex-wrap:wrap">
+          <input
+            v-model="deepseekKey"
+            type="password"
+            class="input"
+            style="max-width:300px; flex:1"
+            placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          />
+          <button class="btn-primary" @click="saveDeepseekKey">保存</button>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -1336,6 +1360,7 @@ const jellyfinForm = reactive({
   userId: '',
 });
 const jellyfinHasPassword = ref(false);
+const deepseekKey = ref('');
 const jellyfinHasApiKey = ref(false);
 const jellyfinSaving = ref(false);
 const jellyfinTesting = ref(false);
@@ -2344,11 +2369,25 @@ function auditActionClass(action: string): string {
   return 'audit-action-ok';
 }
 
+async function loadDeepseekKey() {
+  try {
+    const res = await axios.get('/api/bot/settings/deepseek-key');
+    deepseekKey.value = res.data.key ?? '';
+  } catch { /* ignore */ }
+}
+
+async function saveDeepseekKey() {
+  try {
+    await axios.post('/api/bot/settings/deepseek-key', { key: deepseekKey.value });
+  } catch { /* ignore */ }
+}
+
 onMounted(() => {
   store.fetchBots(); // Refresh bot status on page visit
   checkAuthStatus();
   loadQuality();
   loadIdleTimeout(); // also populates the Spotify config form (same endpoint)
+  loadDeepseekKey();
   loadSpotifyStatus();
   handleSpotifyRedirect();
   if (session.isAdmin.value) {
