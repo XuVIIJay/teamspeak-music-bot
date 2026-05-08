@@ -166,6 +166,8 @@ export interface BotConfig {
    * back to null.
    */
   defaultPlatform: GateableProvider | null;
+  // DeepSeek API key for AI chat feature. Leave empty to disable !ai.
+  deepseekApiKey: string;
 }
 
 export function getDefaultConfig(): BotConfig {
@@ -235,6 +237,7 @@ export function getDefaultConfig(): BotConfig {
     },
     enabledProviders: ["netease", "qq", "bilibili", "youtube", "kugou"],
     defaultPlatform: null,
+    deepseekApiKey: "",
   };
 }
 
