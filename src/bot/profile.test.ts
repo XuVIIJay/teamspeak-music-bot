@@ -30,7 +30,7 @@ function makeMockTs(): TS3Client & {
 
 const noopLogger: any = { child: () => noopLogger, info: () => {}, debug: () => {}, warn: () => {}, error: () => {} };
 
-const cfgOn = { avatarEnabled: true, descriptionEnabled: false, nicknameEnabled: false, awayStatusEnabled: false, channelDescEnabled: false, nowPlayingMsgEnabled: false };
+const cfgOn = { avatarEnabled: true, descriptionEnabled: false, nicknameEnabled: false, awayStatusEnabled: false, channelDescEnabled: false, nowPlayingMsgEnabled: false, welcomeEnabled: false };
 const cfgOff = { ...cfgOn, avatarEnabled: false };
 
 const fakeSong: QueuedSong = {
