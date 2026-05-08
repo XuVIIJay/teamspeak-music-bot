@@ -1,41 +1,52 @@
-  ## 1.新添ai对话控制功能
+## AI 对话功能
 
-  1. 从 [platform.deepseek.com](https://platform.deepseek.com) 注册获取 API Key
-  2. 在项目根目录创建 `.env` 文件：
-     DEEPSEEK_API_KEY=sk-your-key-here
-  3. 重启机器人
+  通过 `!ai <内容>` 命令与 DeepSeek Chat 模型对话，AI 能识别播放指令并自动控制机器人。
+
+  ### 配置方法
+
+  无需创建 `.env` 文件，直接在网页上配置：
+
+  1. 打开浏览器进入 WebUI → **设置**
+  2. 找到 **AI 设置** 区域
+  3. 在输入框中粘贴你的 DeepSeek API Key
+  4. 点击 **保存** 即可使用
+
+  > 如果没有 API Key，前往 [platform.deepseek.com](https://platform.deepseek.com) 注册获取（新用户有免费额度）。
 
   ### 使用示例
 
   | 命令 | 效果 |
   |------|------|
   | `!ai 你好` | AI 回复问候语 |
-  | `!ai 播放周杰伦的歌` | AI 解析指令 → 自动执行 `!play -q 周杰伦` |
-  | `!ai 下一首` | AI 解析指令 → 执行 `!next` |
-  | `!ai 怎么播放歌曲` | AI 文字回答使用方法（不执行命令） |
+  | `!ai 播放周杰伦的歌` | AI 自动执行 `!play -q 周杰伦` 开始播放 |
+  | `!ai 下一首` | AI 执行 `!next` 切歌 |
+  | `!ai 暂停` | AI 执行 `!pause` |
+  | `!ai 怎么播放歌曲` | AI 直接文字回答使用方法，不执行命令 |
+
+  ### 注意事项
+
+  - 所有音乐搜索默认使用 **QQ 音乐**（`-q`），因为 QQ 音乐曲库最全
+  - AI 回复超过 200 字会自动截断
+  - 未配置 API Key 时，`!ai` 会提示"请先在设置页配置 DeepSeek API Key"
+  - API Key 保存在 `config.json` 中，重启机器人不丢失
+  - 如需清除 Key，在设置页清空输入框并保存即可
 
 
-## 2.加入欢迎功能
+  ## 加入欢迎功能
 
-  用户进入机器人所在频道或服务器默认频道时，自动发送欢迎消息。支持 per-bot 独立开关。
+  用户进入机器人所在频道时自动发送频道欢迎，进入服务器默认频道时发送全局服务器欢迎。可在网页设置中独立开关。
 
-  ### 实现原理
+  ### 配置方法
 
-  - **事件驱动**：通过底层库的 `clientEnter`（用户进入视野）和
-  `clientMoved`（用户切换频道）两个事件触发，覆盖所有入场场景
-  - **频道欢迎**：`sendTextMessage(msg, 2)` 发送到当前频道，消息格式 `欢迎{昵称}加入{频道名}，!help
-  获取播放指令，玩的开心哦`
-  - **服务器欢迎**：`sendTextMessage(msg, 3)` 服务器全局广播，消息格式 `欢迎{昵称}加入{服务器名}！使用 !ai
-  与我对话聊天哦`
-  - **去重抑制**：机器人自己切换频道后 3 秒内不发送欢迎（`suppressWelcomeUntil`），避免自旋
-  - **开关持久化**：`welcomeEnabled` 存储在 SQLite `bot_instances.profile_welcome_enabled` 列，默认开启，可在 设置 →
-  机器人 Profile → 加入欢迎 中独立开关
+  1. **设置页开启**：WebUI → 设置 → 机器人 Profile → **加入欢迎**，打开 toggle 开关
+  2. **重启机器人** 使配置生效
+  3. **给机器人 ServerAdmin 权限**（重要）：在 TeamSpeak 客户端中右键机器人 → `编辑权限` → 搜索
+  `b_client_is_sticky`，勾选并设为 `True`（或直接右键机器人 → `ServerGroup` → 加入 `Server Admin`
+  ServerGroup），否则机器人无法收到客户进出频道的事件
 
-  ### 涉及文件
+  ### 功能说明
 
-  | 文件 | 说明 |
-  |------|------|
-  | `src/ts-protocol/client.ts` | 5 个辅助方法（`getDefaultChannelId`、`getMyChannelId` 等）+ 3 个事件发射 |
-  | `src/bot/instance.ts` | 4个处理方法（`_handleClientEnter`、`_handleClientMoved`、`_sendChannelWelcome`、`_sendServerWelcome`） |
-  | `src/data/database.ts` | ProfileConfig 扩展 `welcomeEnabled` + DB 迁移 |
-  | `web/src/views/Settings.vue` | 网页开关 |
+  - **频道欢迎**：用户进入机器人所在频道时，发送 `欢迎{昵称}加入{频道名}，!help 获取播放指令，玩的开心哦`
+  - **服务器欢迎**：用户进入服务器默认频道时，发送 `欢迎{昵称}加入{服务器名}！使用 !ai 与我对话聊天哦`
+  - **防打扰**：机器人自己切换频道后 3 秒内不发送欢迎
+  - **开关独立**：每个机器人可独立开启/关闭，默认开启
