@@ -10,6 +10,12 @@ export interface ParsedCommand {
  * for which commands the permission gate restricts; reclassifying a command is
  * a one-line edit here. Everything not in this set is public.
  */
+export const PUBLIC_COMMANDS = new Set([
+  "play", "add", "queue", "list", "now", "lyrics", "vote", "help",
+  "playlist", "album", "fm", "prev", "next", "skip", "pause", "resume",
+  "artist", "ai",
+]);
+
 export const ADMIN_COMMANDS = new Set([
   "stop", "clear", "remove", "move", "vol", "mode",
 ]);
