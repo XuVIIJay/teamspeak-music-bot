@@ -22,6 +22,8 @@ export interface BotConfig {
   // (nginx/Caddy/Cloudflare). Required for correct protocol/host detection
   // behind HTTPS-terminating proxies.
   trustProxy: boolean;
+  // DeepSeek API key for AI chat feature. Leave empty to disable !ai.
+  deepseekApiKey: string;
 }
 
 export function getDefaultConfig(): BotConfig {
@@ -40,6 +42,7 @@ export function getDefaultConfig(): BotConfig {
     idleTimeoutMinutes: 0,
     publicUrl: "",
     trustProxy: false,
+    deepseekApiKey: "",
   };
 }
 

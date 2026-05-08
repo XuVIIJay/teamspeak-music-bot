@@ -820,7 +820,7 @@ export class BotInstance extends EventEmitter {
     ].join("\n");
 
     try {
-      const reply = await askAI(prompt, systemPrompt);
+      const reply = await askAI(prompt, this.config.deepseekApiKey, systemPrompt);
 
       // 尝试提取 [CMD]...[/CMD]
       const cmdMatch = reply.match(/\[CMD\](.+?)\[\/CMD\]/);

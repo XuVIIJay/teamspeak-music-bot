@@ -1,6 +1,8 @@
 import axios from "axios";
 
-export async function askAI(prompt: string, systemPrompt?: string): Promise<string> {
+export async function askAI(prompt: string, apiKey: string, systemPrompt?: string): Promise<string> {
+  if (!apiKey) return "请先在设置页配置 DeepSeek API Key";
+
   try {
     const res = await axios.post(
       "https://api.deepseek.com/v1/chat/completions",
@@ -17,7 +19,7 @@ export async function askAI(prompt: string, systemPrompt?: string): Promise<stri
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json"
         }
       }
