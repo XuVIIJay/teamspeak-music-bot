@@ -783,6 +783,7 @@ interface ProfileConfig {
   awayStatusEnabled: boolean;
   channelDescEnabled: boolean;
   nowPlayingMsgEnabled: boolean;
+  welcomeEnabled: boolean;
 }
 
 const PROFILE_TOGGLES: ReadonlyArray<{
@@ -797,6 +798,7 @@ const PROFILE_TOGGLES: ReadonlyArray<{
   { key: 'awayStatusEnabled',   label: '走开状态',           hint: '停止播放时把 bot 设为"走开"',               warning: null },
   { key: 'channelDescEnabled',  label: '更新频道描述',       hint: '把"正在播放"信息写入频道描述',             warning: '频道编辑提示音' },
   { key: 'nowPlayingMsgEnabled',label: '推送"正在播放"消息', hint: '切歌时在频道里发一条文字消息',               warning: '新消息提示音' },
+  { key: 'welcomeEnabled',     label: '加入欢迎',           hint: '用户进入频道时发送欢迎消息',                  warning: null },
 ];
 
 const profileConfigs = reactive<Record<string, ProfileConfig>>({});
