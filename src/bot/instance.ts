@@ -193,7 +193,9 @@ export class BotInstance extends EventEmitter {
 
     // 验证用户是否真的在机器人当前频道
     const clients = await this.tsClient.getClientsInChannel();
-    if (!clients.some((c) => c.id === info.id)) {
+    const isInMyChannel = clients.some((c) => c.id === info.id);
+
+    if (!isInMyChannel) {
       // 即使不在本频道，也检查用户是否进入了默认频道
       if (this.defaultChannelId === 0n) {
         this.defaultChannelId = await this.tsClient.getDefaultChannelId();
@@ -211,18 +213,17 @@ export class BotInstance extends EventEmitter {
       return;
     }
 
-    const myChannelId = await this.tsClient.getMyChannelId();
-    if (myChannelId === 0n) return;
-
-    // 频道欢迎
-    await this._sendChannelWelcome(info.nickname, myChannelId);
+    // 频道欢迎（不依赖 myChannelId，直接用 info 中的频道 ID）
+    const channelId = info.channelID !== 0n
+      ? info.channelID
+      : await this.tsClient.getMyChannelId();
+    await this._sendChannelWelcome(info.nickname, channelId);
 
     // 服务器欢迎：仅当本机器人所在频道 == 默认频道
     if (this.defaultChannelId === 0n) {
       this.defaultChannelId = await this.tsClient.getDefaultChannelId();
     }
-    if (this.defaultChannelId !== 0n
-        && myChannelId === this.defaultChannelId) {
+    if (this.defaultChannelId !== 0n && channelId === this.defaultChannelId) {
       await this._sendServerWelcome(info.nickname);
     }
   }
@@ -241,29 +242,31 @@ export class BotInstance extends EventEmitter {
     // 如果底层库返回 0，通过 listClients 查找用户实际所在频道
     if (enteredChannelId === 0n) {
       const found = await this.tsClient.findClientInfo(event.id);
-      if (!found) return;
-      enteredChannelId = found.channelID;
+      if (found) enteredChannelId = found.channelID;
     }
-
-    if (enteredChannelId === 0n) return;
 
     // 查找用户昵称
     let nickname: string | null = null;
 
-    // 情况 A: 用户进入本机器人频道 → 频道欢迎
-    if (enteredChannelId === myChannelId) {
+    // 情况 A: 用户可能进入本机器人频道
+    const sameChannel = enteredChannelId !== 0n
+      ? enteredChannelId === myChannelId
+      : true; // 无法确定频道 ID 时，尝试欢迎
+    if (sameChannel) {
       const channelClients = await this.tsClient.getClientsInChannel();
       const moved = channelClients.find((c) => c.id === event.id);
       if (moved) nickname = moved.nickname;
+      if (!nickname) {
+        const info = await this.tsClient.findClientInfo(event.id);
+        if (info) nickname = info.nickname;
+      }
     }
 
-    // 情况 B: 用户进入默认频道 → 所有机器人都发服务器欢迎
+    // 情况 B: 用户进入默认频道 → 服务器欢迎
     const isDefaultEnter = this.defaultChannelId !== 0n
       && enteredChannelId === this.defaultChannelId;
 
-    // 如果还没拿到昵称，走通用查询
-    if (!nickname
-        && (enteredChannelId === myChannelId || isDefaultEnter)) {
+    if (isDefaultEnter && !nickname) {
       const info = await this.tsClient.findClientInfo(event.id);
       if (info) nickname = info.nickname;
     }
@@ -271,11 +274,11 @@ export class BotInstance extends EventEmitter {
     if (!nickname) return;
 
     // 频道欢迎
-    if (enteredChannelId === myChannelId) {
+    if (sameChannel) {
       await this._sendChannelWelcome(nickname, myChannelId);
     }
 
-    // 服务器欢迎（所有机器人在用户进入默认频道时都发）
+    // 服务器欢迎
     if (isDefaultEnter) {
       await this._sendServerWelcome(nickname);
     }
