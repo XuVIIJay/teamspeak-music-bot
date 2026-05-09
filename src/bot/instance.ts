@@ -295,8 +295,7 @@ export class BotInstance extends EventEmitter {
     const channelName = await this.tsClient.getChannelName(channelId)
       || this.defaultChannelName || "当前频道";
 
-    const msg = `欢迎${nickname}加入${channelName}，`
-      + `!help 获取播放指令，玩的开心哦`;
+    const msg = `🎵欢迎🎈${nickname}🎈加入${channelName}，🎶 !help 获取播放指令，玩的开心哦🍬`;
 
     try {
       await this.tsClient.execCommand(
@@ -315,8 +314,8 @@ export class BotInstance extends EventEmitter {
     try {
       const serverName = await this.tsClient.getServerName();
 
-      const msg = `欢迎${nickname}加入${serverName}！`
-        + `使用 !ai 与我对话聊天哦`;
+      const msg = `🎉欢迎🎈${nickname}🎈加入${serverName}！🎵使用💬!ai 与我对话聊天哦✨`
+        + `\n🔔  在下方选择频道聊天框互动吧  🔔`;
 
       await this.tsClient.execCommand(
         `sendtextmessage targetmode=3 target=0 msg=${escapeTS3(msg)}`
