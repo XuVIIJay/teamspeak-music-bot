@@ -225,5 +225,18 @@ export function createBotRouter(
     res.json({ ok: true });
   });
 
+  // GET /api/bot/settings/ai-memory/:botId
+  router.get("/settings/ai-memory/:botId", (req, res) => {
+    const memory = botDb.getAiMemory(req.params.botId);
+    res.json({ memory });
+  });
+
+  // POST /api/bot/settings/ai-memory/:botId/clear
+  router.post("/settings/ai-memory/:botId/clear", (req, res) => {
+    botDb.saveAiMemory(req.params.botId, "");
+    logger.info({ botId: req.params.botId }, "AI memory cleared via web UI");
+    res.json({ ok: true });
+  });
+
   return router;
 }

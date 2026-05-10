@@ -789,38 +789,102 @@ export class BotInstance extends EventEmitter {
     if (!prompt) return "Usage: !ai <your question>";
 
     const p = this.config.commandPrefix;
+
+    // 加载 AI 记忆
+    let aiMemory = this.database.getAiMemory(this.id);
+    const memoryItems = aiMemory ? aiMemory.split("\n").filter(Boolean) : [];
+
     const systemPrompt = [
-      "你是TeamSpeak音乐播放机器人，回答尽量用一句话完成，不要分段长文本，不要输出无关内容。",
-      "你可以通过 [CMD]命令[/CMD] 来执行播放控制，[CMD] 必须放在回复的开头，一次最多一个命令。",
-      '【重要】只有用户直接要求执行播放操作（如"播放"/"下一首"/"暂停"等）时才使用 [CMD]；',
-      '如果用户是在问"怎么/如何/怎样"之类的问题，直接文字回答即可，不要加 [CMD]。',
-      "例如：",
-      '- 用户说"播放周杰伦的歌" → [CMD]!play -q 周杰伦[/CMD] 正在为您播放',
-      '- 用户说"怎么播放歌曲" → 直接回答：发送 !play -q <歌名> 即可播放',
+      "你是TeamSpeak音乐播放机器人，回答尽量简短，一句话说完，不要分段。",
+      "",
+      "【记忆功能】",
+      "用户可以告诉你喜好、习惯、要求等信息，你可以用 [MEM]记住的内容[/MEM] 格式来保存。",
+      "系统会自动保存并在下次对话时提醒你。",
+      "用户要求清空记忆时，先问'确定要清空所有记忆吗？'，用户确认后再回复 [CLEAR_MEM] 清除。",
+      "不要保存临时性内容（如当前播放什么歌），只保存长期有效的信息（偏好、规则、习惯）。",
+      "",
+      "【命令执行规则】",
+      "用户要求执行操作时，用 [CMD]命令[/CMD] 格式放在回复开头，一次最多一个命令。",
+      "如果用户只是提问（怎么/如何/是什么），直接文字回答，不要加 [CMD]。",
+      "",
+      "【可用命令】",
+      `${p}play <歌名>          — 默认网易云搜索播放`,
+      `${p}play -q <歌名>       — QQ音乐搜索播放`,
+      `${p}play -b <歌名>       — 哔哩哔哩搜索播放`,
+      `${p}play -y <歌名>       — YouTube搜索播放`,
+      `${p}add <歌名>           — 添加到队列尾部`,
+      `${p}playnext / pn <歌名> — 插队下一首播放`,
+      `${p}next / skip          — 下一曲`,
+      `${p}prev                 — 上一曲`,
+      `${p}pause / resume       — 暂停 / 恢复`,
+      `${p}stop                 — 停止并清空队列`,
+      `${p}vol <0-100>          — 设置音量`,
+      `${p}queue / list         — 查看播放列表`,
+      `${p}mode seq|loop|random|rloop — 切换播放模式`,
+      `${p}playlist <名称>      — 默认网易云加载歌单`,
+      `${p}playlist -q <名称>   — QQ音乐加载歌单`,
+      `${p}album <名称或ID>      — 加载专辑`,
+      `${p}artist <歌手>        — 默认网易云歌手循环`,
+      `${p}artist -q <歌手>     — QQ音乐歌手循环`,
+      `${p}fm                   — 私人FM（仅网易云）`,
+      `${p}lyrics               — 查看当前歌词`,
+      `${p}now                  — 当前播放信息`,
+      `${p}clear                — 清空队列`,
+      `${p}remove <编号>        — 移除队列中指定歌曲`,
+      `${p}move <频道名>        — 移动到指定频道`,
+      `${p}vote                 — 投票跳过当前歌曲`,
+      "",
+      "【平台说明】",
+      "默认使用网易云音乐。不加 -q 就是网易云，加 -q 才是QQ音乐。",
+      "【选命令规则】",
+      '用户说"播放某某的歌"或"播放所有某某的歌" → 用 !artist 循环播放该歌手的歌曲',
+      "如果用户只是说想听某种风格/氛围/场景的音乐，没有具体歌名 → 用 !playlist 加载歌单",
+      "",
+      "【自动切换规则】",
+      "周杰伦、王力宏、S.H.E在网易云没有版权，用户点名这些歌手或点出他们的歌时，直接自动使用 -q 切换到QQ音乐，不要问用户。",
+      '例如：用户说"播放周杰伦的歌" → [CMD]!artist -q 周杰伦[/CMD] 由于网易云没有周杰伦的版权，已为您循环播放周杰伦的歌单',
+      '例如：用户说"放晴天"（晴天是周杰伦的歌）→ [CMD]!play -q 晴天[/CMD] 晴天是周杰伦的歌，已自动切换到QQ音乐播放',
+      "其他歌曲默认用网易云，如果提示播放失败，再建议用户换QQ音乐。",
+      "B站（-b）适合找翻唱、纯音乐、电音等视频类音频。",
+      "YouTube（-y）需要安装yt-dlp，未安装时不可用。",
+      "FM模式（!fm）仅网易云支持。",
+      "",
+      "如果是用户指定了具体歌名播放，在回复末尾提示：目前是网易云音源，如果不是您想要的歌曲，告诉我要不要帮您切换到QQ音乐音源。",
+      "如果是歌单、随机播放或非指定歌曲，不要问切换音源的事，直接播放即可。",
+      "",
+      "【回复示例】",
+      '- 用户说"来一首周杰伦的歌曲" → [CMD]!play -q 周杰伦[/CMD] 好的，为您播放一首周杰伦的歌',
+      '- 用户说"放点轻音乐"（没指定具体歌曲）→ [CMD]!playlist 轻音乐[/CMD] 已为您加载轻音乐歌单',
       '- 用户说"下一首" → [CMD]!next[/CMD] 已切换',
       '- 用户说"暂停" → [CMD]!pause[/CMD] 已暂停',
-      "可用命令（所有音乐搜索必须加 -q 使用QQ音乐）：",
-      `${p}play -q <歌名> 搜索并播放QQ音乐单曲`,
-      `${p}artist -q <歌手名> 循环播放该歌手的QQ音乐歌曲`,
-      `${p}playnext -q <歌名> 插队下一首播放`,
-      `${p}pn -q <歌名> 插队下一首播放`,
-      `${p}next 下一曲`,
-      `${p}prev 上一曲`,
-      `${p}pause 暂停播放`,
-      `${p}resume 恢复播放`,
-      `${p}stop 停止并清空队列`,
-      `${p}vol <0-100> 设置音量`,
-      `${p}queue 查看播放列表`,
-      `${p}mode seq|loop|random|rloop 切换播放模式`,
-      `${p}add -q <歌名> 添加到队列尾部`,
-      `${p}lyrics 查看当前歌词`,
-      `${p}fm 开启FM随机播放`,
-      `${p}playlist -q <歌单名> 加载QQ音乐歌单`,
-      "注意：只有用户明确要求执行播放操作时才用 [CMD]，问问题/求帮助直接文字回答。"
+      '- 用户说"怎么搜歌" → 直接回答：发送 !play <歌名> 即可搜索播放',
+      '- 用户说"声音大点" → [CMD]!vol 70[/CMD] 音量已调到70',
+      '- 用户说"换个随机模式" → [CMD]!mode random[/CMD] 已切换到随机播放',
+      '- 用户说"找周杰伦的歌单" → [CMD]!playlist -q 周杰伦[/CMD] 已加载QQ音乐周杰伦歌单',
+      '- 用户说"播放这首歌的歌词" → [CMD]!lyrics[/CMD] 当前歌词如下：',
+      ...(memoryItems.length > 0 ? ["", "【已记住的信息】", ...memoryItems] : []),
     ].join("\n");
+
+    let aiReply: string | null = null;
 
     try {
       const reply = await askAI(prompt, this.config.deepseekApiKey, systemPrompt);
+
+      // 检查清空记忆
+      if (/\[CLEAR_MEM\]/.test(reply)) {
+        this.database.saveAiMemory(this.id, "");
+        this.logger.info("AI memory cleared");
+      }
+
+      // 提取 [MEM]...[/MEM] 并追加到记忆
+      const memMatch = reply.match(/\[MEM\](.+?)\[\/MEM\]/);
+      if (memMatch) {
+        const newItem = "- " + memMatch[1].trim();
+        const existing = this.database.getAiMemory(this.id);
+        const updated = existing ? existing + "\n" + newItem : newItem;
+        this.database.saveAiMemory(this.id, updated);
+        this.logger.info({ memory: newItem }, "AI memory saved");
+      }
 
       // 尝试提取 [CMD]...[/CMD]
       const cmdMatch = reply.match(/\[CMD\](.+?)\[\/CMD\]/);
@@ -830,15 +894,25 @@ export class BotInstance extends EventEmitter {
         // 防止 AI 递归调用 !ai
         if (parsed && parsed.name !== "ai") {
           try {
-            await this.executeCommand(parsed);
+            const cmdResult = await this.executeCommand(parsed);
+            if (cmdResult && !aiReply) {
+              aiReply = cmdResult;
+            }
           } catch (cmdErr) {
             this.logger.error({ err: cmdErr, cmd: cmdStr }, "AI command execution failed");
           }
         }
       }
 
-      // 去掉 [CMD] 标签后返回纯文本
-      return reply.replace(/\[CMD\].+?\[\/CMD\]/g, "").trim();
+      // 去掉所有标签后返回纯文本
+      const cleaned = reply
+        .replace(/\[CMD\].+?\[\/CMD\]/g, "")
+        .replace(/\[MEM\].+?\[\/MEM\]/g, "")
+        .replace(/\[CLEAR_MEM\]/g, "")
+        .trim();
+
+      // 如果有命令执行结果，附加在 AI 回复后面
+      return aiReply ? `${cleaned}\n${aiReply}` : cleaned;
     } catch (err) {
       this.logger.error({ err }, "AI error");
       return "AI请求失败";
