@@ -481,6 +481,16 @@
           <button class="btn-primary" @click="saveDeepseekKey">保存</button>
         </div>
       </div>
+      <div class="setting-row" style="margin-bottom:0">
+        <div class="setting-label">
+          <Icon icon="mdi:brain" class="setting-icon" />
+          <div>
+            <div>AI 记忆</div>
+            <div style="font-size:12px; opacity:0.6; margin-top:2px">AI 会记住您告诉它的偏好和要求</div>
+          </div>
+        </div>
+        <button class="btn-secondary" @click="clearAiMemory" style="background:#f44336;color:white">清空记忆</button>
+      </div>
     </section>
   </div>
 </template>
@@ -879,6 +889,15 @@ async function loadDeepseekKey() {
 async function saveDeepseekKey() {
   try {
     await axios.post('/api/bot/settings/deepseek-key', { key: deepseekKey.value });
+  } catch { /* ignore */ }
+}
+
+async function clearAiMemory() {
+  const botId = store.activeBotId;
+  if (!botId) return;
+  if (!confirm('确定清空 AI 记忆吗？此操作不可撤销。')) return;
+  try {
+    await axios.post(`/api/bot/settings/ai-memory/${botId}/clear`);
   } catch { /* ignore */ }
 }
 
