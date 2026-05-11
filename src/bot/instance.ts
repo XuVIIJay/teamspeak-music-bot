@@ -893,8 +893,8 @@ export class BotInstance extends EventEmitter {
         this.logger.info({ memory: newItem }, "AI memory saved");
       }
 
-      // 尝试提取 [CMD]...[/CMD]
-      const cmdMatch = reply.match(/\[CMD\](.+?)\[\/CMD\]/);
+      // 尝试提取 [CMD]...[/CMD]（容错空格：如 [C MD]）
+      const cmdMatch = reply.match(/\[C\s*M\s*D\](.+?)\[\/CMD\]/);
       if (cmdMatch) {
         const cmdStr = cmdMatch[1].trim();
         const parsed = parseCommand(cmdStr, this.config.commandPrefix, this.config.commandAliases);
@@ -913,7 +913,7 @@ export class BotInstance extends EventEmitter {
 
       // 去掉所有标签后返回纯文本
       const cleaned = reply
-        .replace(/\[CMD\].+?\[\/CMD\]/g, "")
+        .replace(/\[C\s*M\s*D\].+?\[\/CMD\]/g, "")
         .replace(/\[MEM\].+?\[\/MEM\]/g, "")
         .replace(/\[CLEAR_MEM\]/g, "")
         .trim();
