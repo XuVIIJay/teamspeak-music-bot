@@ -20,42 +20,89 @@
 
     <div v-if="loading" class="loading">搜索中...</div>
 
-    <template v-else-if="songs.length || albums.length || playlists.length">
-      <section v-if="albums.length" class="result-section">
-        <h2 class="section-title">专辑</h2>
+    <template v-else-if="allSongs.length || allAlbums.length || allPlaylists.length">
+      <div class="source-bar">
+        <button
+          class="source-btn"
+          :class="{ active: selectedSource === 'netease' }"
+          @click="selectedSource = 'netease'"
+        >网易云</button>
+        <button
+          class="source-btn"
+          :class="{ active: selectedSource === 'qq' }"
+          @click="selectedSource = 'qq'"
+        >QQ</button>
+        <button
+          class="source-btn"
+          :class="{ active: selectedSource === 'bilibili' }"
+          @click="selectedSource = 'bilibili'"
+        >B站</button>
+      </div>
+
+      <div class="tab-bar">
+        <button
+          class="tab"
+          :class="{ active: activeTab === 'songs' }"
+          @click="activeTab = 'songs'"
+        >
+          单曲<span class="tab-count">{{ filteredSongs.length }}</span>
+        </button>
+        <button
+          v-if="selectedSource !== 'bilibili'"
+          class="tab"
+          :class="{ active: activeTab === 'albums' }"
+          @click="activeTab = 'albums'"
+        >
+          专辑<span class="tab-count">{{ filteredAlbums.length }}</span>
+        </button>
+        <button
+          v-if="selectedSource !== 'bilibili'"
+          class="tab"
+          :class="{ active: activeTab === 'playlists' }"
+          @click="activeTab = 'playlists'"
+        >
+          歌单<span class="tab-count">{{ filteredPlaylists.length }}</span>
+        </button>
+      </div>
+
+      <section v-if="activeTab === 'albums' && filteredAlbums.length" class="result-section">
         <div class="card-grid">
           <router-link
-            v-for="al in albums"
+            v-for="al in filteredAlbums"
             :key="`${al.platform}-${al.id}`"
             :to="`/album/${al.id}?platform=${al.platform}`"
             class="card hover-scale"
           >
             <CoverArt :url="al.coverUrl" :size="160" :radius="10" :show-shadow="true" />
-            <div class="card-name">{{ al.name }}</div>
+            <div class="card-name">
+              {{ al.name }}
+              <span class="platform-badge" :class="badgeClass(al.platform)">{{ badgeLabel(al.platform) }}</span>
+            </div>
             <div class="card-sub">{{ al.artist }}</div>
           </router-link>
         </div>
       </section>
 
-      <section v-if="playlists.length" class="result-section">
-        <h2 class="section-title">歌单</h2>
+      <section v-if="activeTab === 'playlists' && filteredPlaylists.length" class="result-section">
         <div class="card-grid">
           <router-link
-            v-for="pl in playlists"
+            v-for="pl in filteredPlaylists"
             :key="`${pl.platform}-${pl.id}`"
             :to="`/playlist/${pl.id}?platform=${pl.platform}`"
             class="card hover-scale"
           >
             <CoverArt :url="pl.coverUrl" :size="160" :radius="10" :show-shadow="true" />
-            <div class="card-name">{{ pl.name }}</div>
+            <div class="card-name">
+              {{ pl.name }}
+              <span class="platform-badge" :class="badgeClass(pl.platform)">{{ badgeLabel(pl.platform) }}</span>
+            </div>
           </router-link>
         </div>
       </section>
 
-      <section v-if="songs.length" class="result-section">
-        <h2 class="section-title">单曲</h2>
+      <section v-if="activeTab === 'songs' && filteredSongs.length" class="result-section">
         <SongCard
-          v-for="(song, i) in songs"
+          v-for="(song, i) in filteredSongs"
           :key="`${song.platform}-${song.id}`"
           :song="song"
           :index="i + 1"
@@ -72,8 +119,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
-import { useRoute } from 'vue-router';
+import { ref, computed, watch, onMounted } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { Icon } from '@iconify/vue';
 import axios from 'axios';
 import { usePlayerStore } from '../stores/player.js';
@@ -83,32 +130,85 @@ import CoverArt from '../components/CoverArt.vue';
 
 const store = usePlayerStore();
 const route = useRoute();
+const router = useRouter();
+
+const SOURCE_STORAGE_KEY = 'search-source';
+
+function loadSource(): 'netease' | 'qq' | 'bilibili' {
+  try {
+    const stored = localStorage.getItem(SOURCE_STORAGE_KEY);
+    if (stored === 'netease' || stored === 'qq' || stored === 'bilibili') return stored;
+  } catch { /* localStorage blocked */ }
+  return 'netease';
+}
 
 const query = ref((route.query.q as string) || '');
+const activeTab = ref<'songs' | 'albums' | 'playlists'>('songs');
+const selectedSource = ref<'netease' | 'qq' | 'bilibili'>(loadSource());
 
 interface Album { id: string; name: string; artist: string; coverUrl: string; songCount?: number; platform: string; }
 interface Playlist { id: string; name: string; coverUrl: string; songCount?: number; platform: string; }
 
-const songs = ref<Song[]>([]);
-const albums = ref<Album[]>([]);
-const playlists = ref<Playlist[]>([]);
+const allSongs = ref<Song[]>([]);
+const allAlbums = ref<Album[]>([]);
+const allPlaylists = ref<Playlist[]>([]);
 const loading = ref(false);
 const searched = ref(false);
+
+const filteredSongs = computed(() =>
+  allSongs.value.filter((s) => s.platform === selectedSource.value)
+);
+
+const filteredAlbums = computed(() =>
+  allAlbums.value.filter((a) => a.platform === selectedSource.value)
+);
+
+const filteredPlaylists = computed(() =>
+  allPlaylists.value.filter((p) => p.platform === selectedSource.value)
+);
+
+// Persist source preference
+watch(selectedSource, (src) => {
+  try { localStorage.setItem(SOURCE_STORAGE_KEY, src); } catch { /* ignore */ }
+});
+
+// B站 has no albums/playlists — force songs tab when switching to B站
+watch(selectedSource, (src) => {
+  if (src === 'bilibili' && activeTab.value !== 'songs') {
+    activeTab.value = 'songs';
+  }
+});
 
 async function doSearch() {
   if (!query.value.trim()) return;
   loading.value = true;
   searched.value = true;
+  activeTab.value = 'songs';
+  router.replace({ query: { q: query.value } });
   try {
     const res = await axios.get('/api/music/search/all', { params: { q: query.value } });
-    songs.value = res.data.songs ?? [];
-    albums.value = res.data.albums ?? [];
-    playlists.value = res.data.playlists ?? [];
+    allSongs.value = res.data.songs ?? [];
+    allAlbums.value = res.data.albums ?? [];
+    allPlaylists.value = res.data.playlists ?? [];
   } catch {
-    songs.value = []; albums.value = []; playlists.value = [];
+    allSongs.value = []; allAlbums.value = []; allPlaylists.value = [];
   } finally {
     loading.value = false;
   }
+}
+
+function badgeLabel(platform: string): string {
+  if (platform === 'qq') return 'QQ';
+  if (platform === 'bilibili') return 'B站';
+  if (platform === 'youtube') return 'YouTube';
+  return '网易云';
+}
+
+function badgeClass(platform: string): string {
+  if (platform === 'qq') return 'badge-qq';
+  if (platform === 'bilibili') return 'badge-bilibili';
+  if (platform === 'youtube') return 'badge-youtube';
+  return 'badge-netease';
 }
 
 onMounted(() => {
@@ -180,14 +280,80 @@ onMounted(() => {
   gap: 2px;
 }
 
+.source-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.source-btn {
+  padding: 5px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: var(--fw-semi);
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+
+  &:hover { color: var(--text-primary); }
+
+  &.active {
+    color: var(--color-primary);
+    background: rgba(51, 94, 234, 0.12);
+  }
+}
+
+.tab-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 24px;
+  padding: 4px;
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  width: fit-content;
+}
+
+.tab {
+  padding: 8px 20px;
+  border-radius: calc(var(--radius-md) - 2px);
+  font-size: 14px;
+  font-family: inherit;
+  font-weight: var(--fw-semi);
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+
+  &:hover { color: var(--text-primary); }
+
+  &.active {
+    background: var(--color-primary);
+    color: #fff;
+    .tab-count { opacity: 0.85; }
+  }
+}
+
+.tab-count {
+  margin-left: 5px;
+  opacity: 0.55;
+  font-weight: var(--fw-regular);
+  font-size: 13px;
+
+  &::before { content: '('; }
+  &::after  { content: ')'; }
+}
+
 .result-section {
   margin-bottom: 32px;
-  .section-title { font-size: 18px; margin: 0 0 12px; opacity: 0.85; }
 }
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 16px;
+  gap: 16px 28px;
 }
 .card {
   display: flex;
@@ -197,5 +363,35 @@ onMounted(() => {
   color: inherit;
   .card-name { font-size: 14px; line-height: 1.3; max-height: 2.6em; overflow: hidden; }
   .card-sub  { font-size: 12px; opacity: 0.6; }
+}
+
+.platform-badge {
+  vertical-align: middle;
+  flex-shrink: 0;
+  font-size: var(--fs-micro);
+  font-weight: var(--fw-semi);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  line-height: 1.4;
+}
+
+.badge-netease {
+  background: var(--brand-netease-15);
+  color: var(--brand-netease);
+}
+
+.badge-qq {
+  background: var(--brand-qq-15);
+  color: var(--brand-qq);
+}
+
+.badge-bilibili {
+  background: var(--brand-bilibili-15);
+  color: var(--brand-bilibili);
+}
+
+.badge-youtube {
+  background: var(--brand-youtube-12);
+  color: var(--brand-youtube);
 }
 </style>

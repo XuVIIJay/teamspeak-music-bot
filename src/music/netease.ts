@@ -112,12 +112,12 @@ export class NeteaseProvider implements MusicProvider {
         params: {
           keywords: query,
           type: 1000,
-          limit: 5,
+          limit: 10,
           ...this.cookieParams,
         },
       }),
       this.api.get("/cloudsearch", {
-        params: { keywords: query, type: 10, limit: 5, ...this.cookieParams },
+        params: { keywords: query, type: 10, limit: 10, ...this.cookieParams },
       }),
     ]);
 

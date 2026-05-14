@@ -638,9 +638,27 @@ export class BotInstance extends EventEmitter {
   }
 
   private async cmdAlbum(cmd: ParsedCommand): Promise<string> {
-    if (!cmd.args) return "Usage: !album <album ID>";
+    if (!cmd.args) return "Usage: !album <album name or ID>";
     const provider = this.getProvider(cmd.flags);
-    const songs = await provider.getAlbumSongs(cmd.args);
+
+    const id = this.extractId(cmd.args);
+    const isNumericId = /^\d+$/.test(cmd.args.trim());
+
+    let albumId: string;
+
+    if (isNumericId || id !== cmd.args) {
+      // Input is a numeric ID or URL containing an ID — use directly
+      albumId = id;
+    } else {
+      // Name-based search
+      const result = await provider.search(cmd.args);
+      const albums = result.albums ?? [];
+      if (albums.length === 0)
+        return `No albums found for: ${cmd.args}`;
+      albumId = albums[0].id;
+    }
+
+    const songs = await provider.getAlbumSongs(albumId);
     if (songs.length === 0) return "Album is empty or not found";
 
     this.queue.clear();

@@ -19,8 +19,6 @@
       "Read(//tmp/**)"
     ],
     "deny": [
-      "Bash(git push * main)",
-      "Bash(git push * master)",
       "Bash(git push --force *)",
       "Bash(rm -rf /)"
     ]

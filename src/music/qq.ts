@@ -12,10 +12,21 @@ import type {
 } from "./provider.js";
 import { parseLyrics } from "./netease.js";
 
-// Direct QQ Music API client — bypasses the local API server for search
-// because @sansenjian/qq-music-api still uses the broken c.y.qq.com endpoint.
-const qqDirectApi = axios.create({
+// Primary search client: u.y.qq.com/cgi-bin/musicu.fcg (JSON sub-request
+// batch). Was broken ca. 2026-05 due to two upstream API changes:
+//   1. searchid param must NOT be present (causes all lists to be empty)
+//   2. num_per_page must be >= 10 (lower values return empty)
+// Both fixes applied per https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/61
+const qqMusicuApi = axios.create({
   baseURL: "https://u.y.qq.com",
+  timeout: 10000,
+  headers: { referer: "https://y.qq.com" },
+});
+
+// Fallback search client: c.y.qq.com/soso/fcgi-bin/client_search_cp (classic
+// endpoint, song + album only, no playlist support).
+const qqSearchApi = axios.create({
+  baseURL: "https://c.y.qq.com",
   timeout: 10000,
   headers: { referer: "https://y.qq.com" },
 });
@@ -82,37 +93,132 @@ export class QQMusicProvider implements MusicProvider {
   }
 
   async search(query: string, limit = 20): Promise<SearchResult> {
-    const reqData = JSON.stringify({
-      req_0: {
-        module: "music.search.SearchCgiService",
-        method: "DoSearchForQQMusicDesktop",
-        param: { searchid: "1", query, num_per_page: Math.min(limit, 50), search_type: 0 },
-      },
-      req_album: {
-        module: "music.search.SearchCgiService",
-        method: "DoSearchForQQMusicDesktop",
-        param: { searchid: "1", query, num_per_page: 5, search_type: 8 },
-      },
-    });
-    const res = await qqDirectApi.get("/cgi-bin/musicu.fcg", {
-      params: { format: "json", data: reqData },
-    });
-    const list: any[] =
-      res.data?.req_0?.data?.body?.song?.list ?? [];
+    // Primary: u.y.qq.com/cgi-bin/musicu.fcg — supports songs + albums +
+    // playlists. Fixed per https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/61
+    // (removed searchid, num_per_page >= 10, corrected search_type values).
+    const primary = await this.searchViaMusicuFcg(query, limit);
+    if (primary) return primary;
 
-    const songs: Song[] = list.map((s: any) => ({
-      id: String(s.mid ?? s.id),
-      name: s.title ?? s.name ?? "",
+    // Fallback: c.y.qq.com/soso/fcgi-bin/client_search_cp (song + album,
+    // no playlist support). Kept as redundancy.
+    return this.searchViaClientSearchCp(query, limit);
+  }
+
+  /** Primary search via u.y.qq.com/cgi-bin/musicu.fcg.
+   *
+   * Two upstream API changes (2026-05) required fixes:
+   *   1. Omit `searchid` — its presence now causes all lists to be empty.
+   *   2. `num_per_page` >= 10 — lower values return empty.
+   *   3. `search_type: 2` for albums, `3` for playlists (8 was "user"). */
+  private async searchViaMusicuFcg(
+    query: string,
+    limit: number
+  ): Promise<SearchResult | null> {
+    try {
+      const numPerPage = Math.max(10, Math.min(limit, 50));
+      const reqData = JSON.stringify({
+        req_0: {
+          module: "music.search.SearchCgiService",
+          method: "DoSearchForQQMusicDesktop",
+          param: { query, num_per_page: numPerPage, search_type: 0 },
+        },
+        req_album: {
+          module: "music.search.SearchCgiService",
+          method: "DoSearchForQQMusicDesktop",
+          param: { query, num_per_page: 10, search_type: 2 },
+        },
+        req_playlist: {
+          module: "music.search.SearchCgiService",
+          method: "DoSearchForQQMusicDesktop",
+          param: { query, num_per_page: 10, search_type: 3 },
+        },
+      });
+      const res = await qqMusicuApi.get("/cgi-bin/musicu.fcg", {
+        params: { format: "json", data: reqData },
+      });
+
+      const songList: any[] =
+        res.data?.req_0?.data?.body?.song?.list ?? [];
+      if (songList.length === 0) return null;
+
+      const songs: Song[] = songList.map((s: any) => ({
+        id: String(s.mid ?? s.id),
+        name: s.title ?? s.name ?? "",
+        artist: (s.singer ?? []).map((a: any) => a.name).join(" / "),
+        album: s.album?.name ?? s.album?.title ?? "",
+        duration: s.interval ?? 0,
+        coverUrl: s.album?.mid
+          ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.album.mid}.jpg`
+          : "",
+        platform: "qq",
+      }));
+
+      const albumList: any[] = res.data?.req_album?.data?.body?.album?.list ?? [];
+      const albums = mapQqAlbums(albumList);
+
+      const playlistList: any[] = res.data?.req_playlist?.data?.body?.songlist?.list ?? [];
+      const playlists: Playlist[] = playlistList.map((p: any) => ({
+        id: String(p.dissid ?? p.id ?? ""),
+        name: p.dissname ?? p.title ?? "",
+        coverUrl: p.imgurl ?? p.logo ?? "",
+        songCount: p.songnum ?? p.song_count ?? 0,
+        platform: "qq" as const,
+      }));
+
+      return { songs, playlists, albums };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Fallback search via c.y.qq.com/soso/fcgi-bin/client_search_cp */
+  private async searchViaClientSearchCp(
+    query: string,
+    limit: number
+  ): Promise<SearchResult> {
+    const songParams = {
+      w: query,
+      format: "json",
+      p: 1,
+      n: Math.min(limit, 50),
+      type: 0,
+      cr: 1,
+    };
+    const albumParams = {
+      w: query,
+      format: "json",
+      p: 1,
+      n: 5,
+      t: 8,
+      cr: 1,
+    };
+
+    const [songRes, albumRes] = await Promise.allSettled([
+      qqSearchApi.get("/soso/fcgi-bin/client_search_cp", { params: songParams }),
+      qqSearchApi.get("/soso/fcgi-bin/client_search_cp", { params: albumParams }),
+    ]);
+
+    const songList: any[] =
+      songRes.status === "fulfilled"
+        ? (songRes.value.data?.data?.song?.list ?? [])
+        : [];
+
+    const songs: Song[] = songList.map((s: any) => ({
+      id: String(s.songmid ?? s.songid ?? ""),
+      name: s.songname ?? s.name ?? "",
       artist: (s.singer ?? []).map((a: any) => a.name).join(" / "),
-      album: s.album?.name ?? s.album?.title ?? "",
+      album: s.albumname ?? s.album?.name ?? "",
       duration: s.interval ?? 0,
-      coverUrl: s.album?.mid
-        ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.album.mid}.jpg`
+      coverUrl: s.albummid
+        ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${s.albummid}.jpg`
         : "",
       platform: "qq",
     }));
 
-    const albumList: any[] = res.data?.req_album?.data?.body?.album?.list ?? [];
+    const albumList: any[] =
+      albumRes.status === "fulfilled"
+        ? (albumRes.value.data?.data?.album?.list ?? [])
+        : [];
     const albums = mapQqAlbums(albumList);
 
     return { songs, playlists: [], albums };
