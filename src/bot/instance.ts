@@ -697,7 +697,7 @@ export class BotInstance extends EventEmitter {
   private async cmdArtist(cmd: ParsedCommand): Promise<string> {
     if (!cmd.args) return "Usage: !artist <artist name>";
     const provider = this.getProvider(cmd.flags);
-    const result = await provider.search(cmd.args, 50);
+    const result = await provider.search(cmd.args, 100);
     if (result.songs.length === 0)
       return `No results found for artist: ${cmd.args}`;
 
