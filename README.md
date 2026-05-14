@@ -1,9 +1,9 @@
-# TSMusicBot 安装教程（功能介绍请往下浏览）
+# TSMusicBot 国内用户安装教程（功能介绍请往下浏览）
 
 ## 第一步：下载项目
 
 ```
-git clone https://gitee.com/XuVIIJay/teamspeak-music-bot
+git clone https://gitee.com/XuVIIJay/teamspeak-music-bot（或git clone https://github.com/XuVIIJay/teamspeak-music-bot)
 ```
 
 或直接下载 ZIP 压缩包（https://gitee.com/XuVIIJay/teamspeak-music-bot → 克隆/下载 → 下载 ZIP），解压。
@@ -96,7 +96,7 @@ npm start
 
 此fork项目基于https://github.com/ZHANGTIANYAO1/teamspeak-music-bot开发
   
-  ## 一、AI 对话功能
+## 一、AI 对话功能
 
   通过 `!ai <内容>` 命令与 DeepSeek Chat 对话，AI 能识别播放指令并自动控制机器人。
 
@@ -120,7 +120,6 @@ npm start
   | `!ai 声音大点` | `!vol 70` | 调音量 |
 
   AI 会自动识别版权情况：周杰伦、王力宏、S.H.E 的歌自动使用 QQ 音乐（`-q`），无需手动指定。
-  
 
   **2. AI 记忆**
 
@@ -137,8 +136,7 @@ npm start
 
   **3. 音源提示**
 
-  默认使用网易云音乐播放，当播放具体歌曲时会提示"目前是网易云音源，如果不是您想要的歌曲，告诉我要不要帮您切换到QQ音乐音
-  源"。
+  默认使用网易云音乐播放，当播放具体歌曲时会提示"目前是网易云音源，如果不是您想要的歌曲，告诉我要不要帮您切换到QQ音乐音源"。
 
   ## 二、加入欢迎功能
 
@@ -148,72 +146,54 @@ npm start
 
   1. **设置页开启**：WebUI → 设置 → 机器人 Profile → **加入欢迎**，打开 toggle 开关
   2. **重启机器人** 使配置生效
-  3. **给机器人 ServerAdmin 权限**（重要）：在 TeamSpeak 客户端中右键机器人 → `编辑权限` → 搜索
-  `b_client_is_sticky`，勾选并设为 `True`（或直接右键机器人 → `ServerGroup` → 加入 `Server Admin`
-  ServerGroup），否则机器人无法收到客户进出频道的事件
+  3. **给机器人 ServerAdmin 权限**（重要）：在 TeamSpeak 客户端中右键机器人 → `编辑权限` → 搜索 `b_client_is_sticky`，勾选并设为 `True`（或直接右键机器人 → `ServerGroup` → 加入 `Server Admin` ServerGroup），否则机器人无法收到客户进出频道的事件
 
   ### 功能说明
 
-  - **频道欢迎**：用户进入机器人所在频道时，发送 `欢迎{昵称}加入{频道名}，!help 获取播放指令，玩的开心哦`
-  - **服务器欢迎**：用户进入服务器默认频道时，发送 `欢迎{昵称}加入{服务器名}！使用 !ai 与我对话聊天哦`
+  - **频道欢迎**：用户进入机器人所在频道时发送欢迎消息
+  - **服务器欢迎**：用户进入服务器默认频道时发送全局服务器欢迎
   - **防打扰**：机器人自己切换频道后 3 秒内不发送欢迎
   - **开关独立**：每个机器人可独立开启/关闭，默认开启
 
-  ## 三、新增播放失败诊断功能。
+  ## 三、播放优化：双向随机播放追溯
 
-  ### 使用方法
+  随机播放（Random/RandomLoop）模式下，`!next` 和 `!prev` 现在可以来回追溯，任意次数内完全可逆。
 
-  无需配置，开箱即用。当 !play、!add、!playnext、!artist、!playlist、!album、!fm 播放失败时，自动追加诊断信息。
+  例如随机播放 5 首歌后，`!prev` 5 次回到起点，再 `!next` 5 次能按**原顺序**回到终点。支持最多 50 步追溯。
 
-  ### 效果示例
+  ## 四、将!help内容改为中文
 
-  #### QQ 未登录时：
+  ### 音乐机器人控制命令
+- `!play <song>` — 搜索歌曲并播放（网易云）
+- `!play -q <song>` — 搜索歌曲并播放（QQ音乐）
+- `!play -b <song>` — 搜索并播放（bilibili）
+- `!play -y <song>` — 搜索并播放（YouTube）
+- `!add <song>` — 添加歌曲到队尾
+- `!playnext <song>` — 插队下一首播放
+- `!pn <song>` — 插队下一首播放（简化命令）
+- `!pause` / `!resume` — 暂停/恢复播放
+- `!next` / `!prev` — 下一曲/上一曲
+- `!stop` — 暂停播放并清空播放队列
+- `!vol <0-100>` — 设置音量
+- `!queue` — 查看播放队列
+- `!mode <seq|loop|random|rloop>` — 播放模式（顺序|循环|随机|随机循环）
+- `!playlist <name or id>` — 通过名称或者歌单id加载歌单（网易云）
+- `!playlist -q <name or id>` — 通过名称或者歌单id加载歌单（QQ音乐）
+- `!album <id>` — 加载专辑
+- `!fm` — 个人电台（网易云）
+- `!artist <name>` — 循环播放歌手的歌曲（网易云）
+- `!artist -q <name>` — 循环播放歌手的歌曲（QQ音乐）
+- `!vote` — 投票跳过当前歌曲
+- `!lyrics` — 显示歌词
+- `!now` — 显示当前歌曲信息
+- `!ai <内容>` — 与AI对话
+- `!help` — 帮助信息
 
-  无法播放: 周杰伦
-  网易云：已登录(nickname)(黑胶VIP)，QQ音乐：未登录
-  QQ音乐未登录，请在WebUI设置页扫码登录QQ音乐
+## 五、网易云添加歌手歌曲上限优化
 
-  #### QQ 已登录但无 VIP 时：
-  QQ音乐已登录但无法播放，请检查是否开通绿钻或Hollywood VIP
+网易云官方api一次性搜索获得歌曲最多可以有100首，qq音乐最多只能有50首
 
-  #### 网易云无 VIP 时：
-
-  网易云：已登录(司登努)(无VIP)，QQ音乐：未登录
-  网易云已登录但无VIP，可能无法播放VIP歌曲，请检查是否开通黑胶VIP
-
-  - 新增 getAuthDiag(platform) — 查询网易云登录/VIP + QQ 登录，返回诊断文字和针对性提示
-  - cmdPlay / cmdAdd / cmdPlayNext — 原有报错改为中文 + 追加诊断
-  - cmdArtist / cmdPlaylist / cmdAlbum / cmdFm — 原来播放失败不检查，修复为检查 resolveAndPlay 返回值并报错
-
-  ## 四、把!help返回内容改为中文
-  音乐机器人控制命令：
-  
-!play <song>  — 搜索歌曲并播放（网易云）
-!play -q <song>  — 搜索歌曲并播放（QQ音乐）
-!play -b <song>  — 搜索并播放（bilibili）
-!play -y <song>  — 搜索并播放（YouTube）
-!add <song>  — 添加歌曲到队尾
-!playnext <song> — 插队下一首播放
-!pn <song> — 插队下一首播放（简化命令）
-!pause/resume  — 暂停/恢复播放
-!next/prev   — 下一曲/上一曲
-!stop  — 暂停播放并清空播放队列
-!vol <0-100>  — 设置音量
-!queue  — 查看播放队列
-!mode <seq|loop|random|rloop>  — 播放模式（顺序|循环|随机|随机循环）
-!playlist <name or id>  — 通过名称或者歌单id加载歌单（网易云）
-!playlist -q <name or id>  — 通过名称或者歌单id加载歌单（QQ音乐）
-!album <id>  — 加载专辑
-!fm  — 个人电台（网易云）
-!artist <name>  — 循环播放歌手的歌曲（网易云）
-!artist -q <name>  — 循环播放歌手的歌曲（QQ音乐）
-!vote  — 投票跳过当前歌曲
-!lyrics  — 显示歌词
-!now  — 显示当前歌曲信息
-!ai <内容>  — 与AI对话
-!help  — 帮助信息
-
-## 五、网易云!artist 返回50首改为100首
+原本作者给二者都限制在50首，这里把网易云上限添加到了100首
 
 ## 六、新添适配国内环境的安装脚本
   
