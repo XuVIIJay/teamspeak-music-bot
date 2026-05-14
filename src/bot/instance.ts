@@ -825,9 +825,25 @@ export class BotInstance extends EventEmitter {
   }
 
   private async cmdAlbum(cmd: ParsedCommand): Promise<string> {
-    if (!cmd.args) return "Usage: !album <album ID>";
+    if (!cmd.args) return "Usage: !album <album name or ID>";
     const provider = this.getProvider(cmd.flags);
-    const songs = await provider.getAlbumSongs(cmd.args);
+
+    const id = this.extractId(cmd.args);
+    const isNumericId = /^\d+$/.test(cmd.args.trim());
+
+    let albumId: string;
+
+    if (isNumericId || id !== cmd.args) {
+      albumId = id;
+    } else {
+      const result = await provider.search(cmd.args);
+      const albums = result.albums ?? [];
+      if (albums.length === 0)
+        return `No albums found for: ${cmd.args}`;
+      albumId = albums[0].id;
+    }
+
+    const songs = await provider.getAlbumSongs(albumId);
     if (songs.length === 0) return "Album is empty or not found";
 
     this.queue.clear();
@@ -876,7 +892,7 @@ export class BotInstance extends EventEmitter {
   private async cmdArtist(cmd: ParsedCommand): Promise<string> {
     if (!cmd.args) return "Usage: !artist <artist name>";
     const provider = this.getProvider(cmd.flags);
-    const result = await provider.search(cmd.args, 50);
+    const result = await provider.search(cmd.args, 100);
     if (result.songs.length === 0)
       return `No results found for artist: ${cmd.args}`;
 
@@ -1163,31 +1179,32 @@ export class BotInstance extends EventEmitter {
   private cmdHelp(): string {
     const p = this.config.commandPrefix;
     return [
-      "TSMusicBot Commands:",
-      `${p}play <song>  — Search and play`,
-      `${p}play -q <song> — Search from QQ Music`,
-      `${p}play -b <song> — Search from BiliBili`,
-      `${p}play -y <song> — Search from YouTube (yt-dlp)`,
-      `${p}add <song>   — Add to queue`,
-      `${p}playnext <song> — Insert as next song (alias: ${p}pn)`,
-      `${p}pause/resume — Pause/resume`,
-      `${p}next/prev    — Next/previous`,
-      `${p}stop         — Stop and clear queue`,
-      `${p}vol <0-100>  — Set volume`,
-      `${p}queue        — Show queue`,
-      `${p}remove <pos> — Remove song at position (see ${p}queue)`,
-      `${p}mode <seq|loop|random|rloop> — Play mode`,
-      `${p}playlist <name or id> — Load playlist by name or ID`,
-      `${p}playlist -q <name or id> — Load playlist from QQ Music`,
-      `${p}album <id>   — Load album`,
-      `${p}fm           — Personal FM (NetEase)`,
-      `${p}artist <name> — Play songs by artist (loop)`,
-      `${p}artist -q <name> — Artist loop from QQ Music`,
-      `${p}vote         — Vote to skip`,
-      `${p}lyrics       — Show lyrics`,
-      `${p}now          — Current song info`,
-      `${p}ai <content> — Chat with AI`,
-      `${p}help         — This help message`,
+      "音乐机器人控制命令：",
+      `${p}play <song>  — 搜索歌曲并播放（网易云）`,
+      `${p}play -q <song>  — 搜索歌曲并播放（QQ音乐）`,
+      `${p}play -b <song>  — 搜索并播放（bilibili）`,
+      `${p}play -y <song>  — 搜索并播放（YouTube）`,
+      `${p}add <song>  — 添加歌曲到队尾`,
+      `${p}playnext <song> — 插队下一首播放`,
+      `${p}pn <song> — 插队下一首播放（简化命令）`,
+      `${p}pause/resume  — 暂停/恢复播放`,
+      `${p}next/prev   — 下一曲/上一曲`,
+      `${p}stop  — 暂停播放并清空播放队列`,
+      `${p}vol <0-100>  — 设置音量`,
+      `${p}queue  — 查看播放队列`,
+      `${p}remove <pos>  — 移除队列中指定位置的歌曲（配合 ${p}queue 使用）`,
+      `${p}mode <seq|loop|random|rloop>  — 播放模式（顺序|循环|随机|随机循环）`,
+      `${p}playlist <name or id>  — 通过名称或者歌单id加载歌单（网易云）`,
+      `${p}playlist -q <name or id>  — 通过名称或者歌单id加载歌单（QQ音乐）`,
+      `${p}album <name or id>  — 通过名称或id加载专辑`,
+      `${p}fm  — 个人电台（网易云）`,
+      `${p}artist <name>  — 循环播放歌手的歌曲（网易云）`,
+      `${p}artist -q <name>  — 循环播放歌手的歌曲（QQ音乐）`,
+      `${p}vote  — 投票跳过当前歌曲`,
+      `${p}lyrics  — 显示歌词`,
+      `${p}now  — 显示当前歌曲信息`,
+      `${p}ai <内容>  — 与AI对话`,
+      `${p}help  — 帮助信息`,
     ].join("\n");
   }
 
