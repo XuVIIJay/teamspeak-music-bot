@@ -189,6 +189,10 @@ export class BotInstance extends EventEmitter {
 
   private async _handleClientEnter(info: ClientInfo): Promise<void> {
     this.logger.info({ nickname: info.nickname, clientId: info.id, channelID: info.channelID }, "clientEnter event");
+    if (info.id === this.tsClient.botClientId) {
+      this.logger.info({ nickname: info.nickname, clientId: info.id }, "clientEnter skipped (self)");
+      return;
+    }
     if (Date.now() < this.suppressWelcomeUntil) {
       this.logger.info({ nickname: info.nickname }, "clientEnter suppressed (cooldown)");
       return;
@@ -246,6 +250,10 @@ export class BotInstance extends EventEmitter {
     event: ClientMovedEvent
   ): Promise<void> {
     this.logger.info({ clientId: event.id, targetChannelID: event.targetChannelID }, "clientMoved event");
+    if (event.id === this.tsClient.botClientId) {
+      this.logger.info({ clientId: event.id }, "clientMoved skipped (self)");
+      return;
+    }
     if (!this.profileManager.getConfig().welcomeEnabled) {
       this.logger.info("clientMoved skipped (welcome disabled)");
       return;

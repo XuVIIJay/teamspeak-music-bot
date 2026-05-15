@@ -65,6 +65,7 @@ export class TS3Client extends EventEmitter {
   private client: TS3FullClient | null = null;
   private identity: Identity;
   private clientId = 0;
+  get botClientId(): number { return this.clientId; }
   private logger: Logger;
   private disconnecting = false;
   private detectedProtocol: ServerProtocol = "unknown";
