@@ -112,6 +112,7 @@ export class TS3Client extends EventEmitter {
     number,
     ReturnType<typeof setTimeout>
   >();
+  get botClientId(): number { return this.clientId; }
   private logger: Logger;
   private disconnecting = false;
   private detectedProtocol: ServerProtocol = "unknown";
