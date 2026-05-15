@@ -19,6 +19,21 @@ echo ""
 echo "Log file: $LOG_FILE"
 echo ""
 
+# ---- Check Node.js ----
+if ! command -v node &>/dev/null; then
+    echo "[ERROR] Node.js not found. Please install Node.js 20+ from https://nodejs.org"
+    echo "        or https://nodejs.cn/ (China mirror)."
+    exit 1
+fi
+echo "[OK] Node.js $(node -v)"
+
+if ! command -v npm &>/dev/null; then
+    echo "[ERROR] npm not found."
+    exit 1
+fi
+echo "[OK] npm v$(npm -v)"
+echo ""
+
 # ---- Detect China network ----
 USE_MIRROR=0
 MIRROR_REGISTRY="https://registry.npmjs.org"
