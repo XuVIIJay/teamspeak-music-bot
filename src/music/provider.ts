@@ -6,6 +6,7 @@ export interface Song {
   duration: number; // seconds
   coverUrl: string;
   platform: "netease" | "qq" | "bilibili" | "youtube";
+  fee?: number; // 0=免费, 1=VIP, 4=付费专辑, 8=付费单曲
 }
 
 export interface SongWithUrl extends Song {
