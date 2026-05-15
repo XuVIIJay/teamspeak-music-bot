@@ -573,8 +573,15 @@ export class BotInstance extends EventEmitter {
   // ─────────────────────────────────────────────
 
   private async _handleClientEnter(info: ClientInfo): Promise<void> {
-    if (Date.now() < this.suppressWelcomeUntil) return;
-    if (!this.profileManager.getConfig().welcomeEnabled) return;
+    this.logger.info({ nickname: info.nickname, clientId: info.id, channelID: info.channelID }, "clientEnter event");
+    if (Date.now() < this.suppressWelcomeUntil) {
+      this.logger.info({ nickname: info.nickname }, "clientEnter suppressed (cooldown)");
+      return;
+    }
+    if (!this.profileManager.getConfig().welcomeEnabled) {
+      this.logger.info("clientEnter skipped (welcome disabled)");
+      return;
+    }
 
     // 验证用户是否真的在机器人当前频道
     const clients = await this.tsClient.getClientsInChannel();
@@ -589,6 +596,7 @@ export class BotInstance extends EventEmitter {
         try {
           const userInfo = await this.tsClient.findClientInfo(info.id);
           if (userInfo && userInfo.channelID === this.defaultChannelId) {
+            this.logger.info({ nickname: info.nickname }, "clientEnter → server welcome (default channel)");
             await this._sendServerWelcome(info.nickname);
           }
         } catch (err) {
@@ -602,6 +610,7 @@ export class BotInstance extends EventEmitter {
     const channelId = info.channelID !== 0n
       ? info.channelID
       : await this.tsClient.getMyChannelId();
+    this.logger.info({ nickname: info.nickname, channelId }, "clientEnter → channel welcome");
     await this._sendChannelWelcome(info.nickname, channelId);
 
     // 服务器欢迎：仅当本机器人所在频道 == 默认频道
@@ -609,6 +618,7 @@ export class BotInstance extends EventEmitter {
       this.defaultChannelId = await this.tsClient.getDefaultChannelId();
     }
     if (this.defaultChannelId !== 0n && channelId === this.defaultChannelId) {
+      this.logger.info({ nickname: info.nickname }, "clientEnter → server welcome (bot in default channel)");
       await this._sendServerWelcome(info.nickname);
     }
   }
@@ -620,7 +630,11 @@ export class BotInstance extends EventEmitter {
   private async _handleClientMoved(
     event: ClientMovedEvent
   ): Promise<void> {
-    if (!this.profileManager.getConfig().welcomeEnabled) return;
+    this.logger.info({ clientId: event.id, targetChannelID: event.targetChannelID }, "clientMoved event");
+    if (!this.profileManager.getConfig().welcomeEnabled) {
+      this.logger.info("clientMoved skipped (welcome disabled)");
+      return;
+    }
     const myChannelId = await this.tsClient.getMyChannelId();
     let enteredChannelId = event.targetChannelID;
 
@@ -656,15 +670,20 @@ export class BotInstance extends EventEmitter {
       if (info) nickname = info.nickname;
     }
 
-    if (!nickname) return;
+    if (!nickname) {
+      this.logger.info({ clientId: event.id }, "clientMoved no nickname, skip");
+      return;
+    }
 
     // 频道欢迎
     if (sameChannel) {
+      this.logger.info({ nickname, channelId: myChannelId }, "clientMoved → channel welcome");
       await this._sendChannelWelcome(nickname, myChannelId);
     }
 
     // 服务器欢迎
     if (isDefaultEnter) {
+      this.logger.info({ nickname }, "clientMoved → server welcome");
       await this._sendServerWelcome(nickname);
     }
   }
@@ -680,6 +699,7 @@ export class BotInstance extends EventEmitter {
       || this.defaultChannelName || "当前频道";
 
     const msg = `🎵欢迎🎈${nickname}🎈加入${channelName}，🎶 !help 获取播放指令，玩的开心哦🍬`;
+    this.logger.info({ nickname, channelName, channelId }, "SEND channel welcome");
 
     try {
       await this.tsClient.execCommand(
@@ -700,6 +720,7 @@ export class BotInstance extends EventEmitter {
 
       const msg = `🎉欢迎🎈${nickname}🎈加入${serverName}！🎵使用💬!ai 与我对话聊天哦✨`
         + `\n🔔  在下方选择频道聊天框互动吧  🔔`;
+      this.logger.info({ nickname, serverName }, "SEND server welcome");
 
       await this.tsClient.execCommand(
         `sendtextmessage targetmode=3 target=0 msg=${escapeTS3(msg)}`
