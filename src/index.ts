@@ -1,3 +1,4 @@
+import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig } from "./data/config.js";

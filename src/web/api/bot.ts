@@ -207,5 +207,36 @@ export function createBotRouter(
     res.json({ ok: true });
   });
 
+  // GET /api/bot/settings/deepseek-key
+  router.get("/settings/deepseek-key", (_req, res) => {
+    res.json({ key: config.deepseekApiKey ?? "" });
+  });
+
+  // POST /api/bot/settings/deepseek-key
+  router.post("/settings/deepseek-key", (req, res) => {
+    const { key } = req.body;
+    if (typeof key !== "string") {
+      res.status(400).json({ error: "key must be a string" });
+      return;
+    }
+    config.deepseekApiKey = key;
+    saveConfig(configPath, config);
+    logger.info({ hasKey: !!key }, "DeepSeek API key saved via web UI");
+    res.json({ ok: true });
+  });
+
+  // GET /api/bot/settings/ai-memory/:botId
+  router.get("/settings/ai-memory/:botId", (req, res) => {
+    const memory = botDb.getAiMemory(req.params.botId);
+    res.json({ memory });
+  });
+
+  // POST /api/bot/settings/ai-memory/:botId/clear
+  router.post("/settings/ai-memory/:botId/clear", (req, res) => {
+    botDb.saveAiMemory(req.params.botId, "");
+    logger.info({ botId: req.params.botId }, "AI memory cleared via web UI");
+    res.json({ ok: true });
+  });
+
   return router;
 }

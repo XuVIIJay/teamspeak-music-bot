@@ -16,6 +16,7 @@ import {
   type ParsedCommand,
 } from "./commands.js";
 import type { Logger } from "../logger.js";
+import { askAI } from "./ai.js";
 import type { BotDatabase, ProfileConfig } from "../data/database.js";
 import type { BotConfig } from "../data/config.js";
 import { BotProfileManager } from "./profile.js";
@@ -528,6 +529,8 @@ export class BotInstance extends EventEmitter {
         return this.cmdMove(cmd);
       case "follow":
         return this.cmdFollow(msg);
+      case "ai":
+        return this.cmdAi(cmd);
       case "help":
         return this.cmdHelp();
       default:
@@ -1086,6 +1089,149 @@ export class BotInstance extends EventEmitter {
     return "Following you to your channel";
   }
 
+  private async cmdAi(cmd: ParsedCommand): Promise<string> {
+    const prompt = cmd.args;
+    if (!prompt) return "Usage: !ai <your question>";
+
+    const p = this.config.commandPrefix;
+
+    // 加载 AI 记忆
+    let aiMemory = this.database.getAiMemory(this.id);
+    const memoryItems = aiMemory ? aiMemory.split("\n").filter(Boolean) : [];
+
+    const systemPrompt = [
+      "你是TeamSpeak音乐播放机器人，回答尽量简短，一句话说完，不要分段。",
+      "",
+      "【记忆功能】",
+      "用户可以告诉你喜好、习惯、要求等信息，你可以用 [MEM]记住的内容[/MEM] 格式来保存。",
+      "系统会自动保存并在下次对话时提醒你。",
+      "用户要求清空记忆时，先问'确定要清空所有记忆吗？'，用户确认后再回复 [CLEAR_MEM] 清除。",
+      "不要保存临时性内容（如当前播放什么歌），只保存长期有效的信息（偏好、规则、习惯）。",
+      "",
+      "【命令执行规则】",
+      "用户要求执行操作时，用 【命令】命令【/命令】 格式放在回复开头，一次最多一个命令。",
+      "如果用户只是提问（怎么/如何/是什么），直接文字回答，不要加 【命令】。",
+      "",
+      "【可用命令】",
+      `${p}play <歌名>          — 默认网易云搜索播放`,
+      `${p}play -q <歌名>       — QQ音乐搜索播放`,
+      `${p}play -b <歌名>       — 哔哩哔哩搜索播放`,
+      `${p}play -y <歌名>       — YouTube搜索播放`,
+      `${p}add <歌名>           — 添加到队列尾部`,
+      `${p}playnext / pn <歌名> — 插队下一首播放`,
+      `${p}next / skip          — 下一曲`,
+      `${p}prev                 — 上一曲`,
+      `${p}pause / resume       — 暂停 / 恢复`,
+      `${p}stop                 — 停止并清空队列`,
+      `${p}vol <0-100>          — 设置音量`,
+      `${p}queue / list         — 查看播放列表`,
+      `${p}mode seq|loop|random|rloop — 切换播放模式`,
+      `${p}playlist <名称>      — 默认网易云加载歌单`,
+      `${p}playlist -q <名称>   — QQ音乐加载歌单`,
+      `${p}album <名称或ID>      — 加载专辑`,
+      `${p}artist <歌手>        — 默认网易云歌手循环`,
+      `${p}artist -q <歌手>     — QQ音乐歌手循环`,
+      `${p}fm                   — 私人FM（仅网易云）`,
+      `${p}lyrics               — 查看当前歌词`,
+      `${p}now                  — 当前播放信息`,
+      `${p}clear                — 清空队列`,
+      `${p}remove <编号>        — 移除队列中指定歌曲`,
+      `${p}move <频道名>        — 移动到指定频道`,
+      `${p}vote                 — 投票跳过当前歌曲`,
+      "",
+      "【平台说明】",
+      "默认使用网易云音乐。不加 -q 就是网易云，加 -q 才是QQ音乐。",
+      "【选命令规则】",
+      '用户说"播放某某的歌"或"播放所有某某的歌" → 用 !artist 循环播放该歌手的歌曲',
+      '用户说"下一首播放XXX"或"插播XXX" → 用 !pn（playnext）添加到队列下一首，不要直接播放',
+      "如果用户只是说想听某种风格/氛围/场景的音乐，没有具体歌名 → 用 !playlist 加载歌单",
+      "",
+      "【自动切换规则】",
+      "以下歌手在网易云没有版权，用户点名这些歌手或点出属于他们的歌时，直接自动使用 -q 切换到QQ音乐，不要问用户。利用你的知识判断某首歌是否属于这些歌手：",
+      "  - 周杰伦（热门歌曲：晴天、花海、彩虹、七里香、稻香、青花瓷等）",
+      "  - 王力宏（热门歌曲：你不知道的事、大城小爱、唯一、改变自己、龙的传人、爱错、Kiss Goodbye、Forever Love等）",
+      "  - S.H.E（热门歌曲：Super Star、不想长大、中国话、恋人未满等）",
+      '例如：用户说"播放周杰伦的歌" → 【命令】!artist -q 周杰伦【/命令】 周杰伦在网易云没有版权，已自动切换到QQ音乐循环播放',
+      '例如：用户说"放晴天" → 【命令】!play -q 晴天【/命令】 晴天是周杰伦的歌，已自动切换到QQ音乐播放',
+      '例如：用户说"听你不知道的事" → 【命令】!play -q 你不知道的事【/命令】 你不知道的事是王力宏的歌，已自动切换到QQ音乐播放',
+      '例如：用户说"来一首不想长大" → 【命令】!play -q 不想长大【/命令】 不想长大是S.H.E的歌，已自动切换到QQ音乐播放',
+      "除以上列出的三位歌手的歌曲外，其他歌手默认用网易云，不要自动加 -q。",
+      "其他歌曲默认用网易云，如果提示播放失败，再建议用户换QQ音乐。",
+      "B站（-b）适合找翻唱、纯音乐、电音等视频类音频。",
+      "YouTube（-y）需要安装yt-dlp，未安装时不可用。",
+      "FM模式（!fm）仅网易云支持。",
+      "",
+      "如果是用户指定了具体歌名播放，在回复末尾提示：目前是网易云音源，如果不是您想要的歌曲，告诉我要不要帮您切换到QQ音乐音源。",
+      "如果是歌单、随机播放或非指定歌曲，不要问切换音源的事，直接播放即可。",
+      "",
+      "【回复示例】",
+      '- 用户说"来一首周杰伦的歌曲" → 【命令】!play -q 周杰伦【/命令】 好的，为您播放一首周杰伦的歌',
+      '- 用户说"放点轻音乐"（没指定具体歌曲）→ 【命令】!playlist 轻音乐【/命令】 已为您加载轻音乐歌单',
+      '- 用户说"下一首" → 【命令】!next【/命令】 已切换',
+      '- 用户说"下一首播放晴天" → 【命令】!pn -q 晴天【/命令】 已将晴天添加到下一首播放（周杰伦的歌，自动使用QQ音乐）',
+      '- 用户说"暂停" → 【命令】!pause【/命令】 已暂停',
+      '- 用户说"怎么搜歌" → 直接回答：发送 !play <歌名> 即可搜索播放',
+      '- 用户说"声音大点" → 【命令】!vol 70【/命令】 音量已调到70',
+      '- 用户说"换个随机模式" → 【命令】!mode random【/命令】 已切换到随机播放',
+      '- 用户说"找周杰伦的歌单" → 【命令】!playlist -q 周杰伦【/命令】 已加载QQ音乐周杰伦歌单',
+      '- 用户说"播放这首歌的歌词" → 【命令】!lyrics【/命令】 当前歌词如下：',
+      ...(memoryItems.length > 0 ? ["", "【已记住的信息】", ...memoryItems] : []),
+    ].join("\n");
+
+    let aiReply: string | null = null;
+
+    try {
+      const reply = await askAI(prompt, this.config.deepseekApiKey, systemPrompt);
+
+      // 检查清空记忆
+      if (/\[CLEAR_MEM\]/.test(reply)) {
+        this.database.saveAiMemory(this.id, "");
+        this.logger.info("AI memory cleared");
+      }
+
+      // 提取 [MEM]...[/MEM] 并追加到记忆
+      const memMatch = reply.match(/\[MEM\](.+?)\[\/MEM\]/);
+      if (memMatch) {
+        const newItem = "- " + memMatch[1].trim();
+        const existing = this.database.getAiMemory(this.id);
+        const updated = existing ? existing + "\n" + newItem : newItem;
+        this.database.saveAiMemory(this.id, updated);
+        this.logger.info({ memory: newItem }, "AI memory saved");
+      }
+
+      // 提取【命令】...【/命令】
+      const cmdMatch = reply.match(/【命令】(.+?)【\/命令】/);
+      if (cmdMatch) {
+        const cmdStr = cmdMatch[1].trim();
+        const parsed = parseCommand(cmdStr, this.config.commandPrefix, this.config.commandAliases);
+        // 防止 AI 递归调用 !ai
+        if (parsed && parsed.name !== "ai") {
+          try {
+            const cmdResult = await this.executeCommand(parsed);
+            if (cmdResult && !aiReply) {
+              aiReply = cmdResult;
+            }
+          } catch (cmdErr) {
+            this.logger.error({ err: cmdErr, cmd: cmdStr }, "AI command execution failed");
+          }
+        }
+      }
+
+      // 去掉所有标签后返回纯文本
+      const cleaned = reply
+        .replace(/【命令】.+?【\/命令】/g, "")
+        .replace(/\[MEM\].+?\[\/MEM\]/g, "")
+        .replace(/\[CLEAR_MEM\]/g, "")
+        .trim();
+
+      // 如果有命令执行结果，附加在 AI 回复后面
+      return aiReply ? `${cleaned}\n${aiReply}` : cleaned;
+    } catch (err) {
+      this.logger.error({ err }, "AI error");
+      return "AI请求失败";
+    }
+  }
+
   private cmdHelp(): string {
     const p = this.config.commandPrefix;
     return [
@@ -1115,6 +1261,7 @@ export class BotInstance extends EventEmitter {
       `${p}now  — 显示当前歌曲信息`,
       `${p}ai <内容>  — 与AI对话`,
       `${p}help  — 帮助信息`,
+
     ].join("\n");
   }
 
