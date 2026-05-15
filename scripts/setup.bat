@@ -48,25 +48,11 @@ call :step "1/7" "Checking Node.js"
 where node >nul 2>&1
 if not errorlevel 1 goto :check_node_version
 
-:: Node not in PATH — try common install locations
-set "NODE_CANDIDATES="
-if exist "F:\nodejs\node.exe" set "NODE_CANDIDATES=F:\nodejs"
-if exist "C:\Program Files\nodejs\node.exe" set "NODE_CANDIDATES=C:\Program Files\nodejs"
-if exist "%LOCALAPPDATA%\fnm\nodejs\current\node.exe" set "NODE_CANDIDATES=%LOCALAPPDATA%\fnm\nodejs\current"
-if exist "%USERPROFILE%\AppData\Local\fnm\nodejs\current\node.exe" set "NODE_CANDIDATES=%USERPROFILE%\AppData\Local\fnm\nodejs\current"
-if exist "C:\tools\nodejs\node.exe" set "NODE_CANDIDATES=C:\tools\nodejs"
-
-if defined NODE_CANDIDATES (
-    set "PATH=%NODE_CANDIDATES%;%PATH%"
-    echo [OK] Node.js found at: %NODE_CANDIDATES%
-    call :log "Node.js found at: %NODE_CANDIDATES%"
-    goto :check_node_version
-)
-
 call :error "Node.js not found in PATH."
 echo.
 echo Please install Node.js %MIN_NODE_MAJOR% LTS or newer from:
-echo   https://nodejs.cn/  (China mirror, recommended)
+echo   https://nodejs.org/  (official)
+echo   https://nodejs.cn/   (China mirror, recommended)
 echo.
 pause
 exit /b 1
