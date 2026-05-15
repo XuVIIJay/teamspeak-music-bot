@@ -1180,7 +1180,7 @@ export class BotInstance extends EventEmitter {
       const d = await this.getAuthDiag(song0.platform as "netease" | "qq");
       return `无法播放: ${song0.name}\n${d.status}\n${d.hint}`;
     }
-    return `Now playing: ${song0.name} - ${song0.artist}`;
+    return `Now playing: ${song0.name} - ${song0.artist}${await this.getTrialWarning(song0)}`;
   }
 
   /**
@@ -1288,7 +1288,7 @@ export class BotInstance extends EventEmitter {
         const d = await this.getAuthDiag(s.platform as "netease" | "qq");
         return `无法播放: ${s.name}\n${d.status}\n${d.hint}`;
       }
-      return `Now playing: ${s.name} - ${s.artist}`;
+      return `Now playing: ${s.name} - ${s.artist}${await this.getTrialWarning(s)}`;
     }
 
     this.emit("stateChange");
@@ -1560,7 +1560,7 @@ export class BotInstance extends EventEmitter {
       const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
       return `无法播放歌单: ${cmd.args}\n${d.status}\n${d.hint}`;
     }
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdAlbum(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1602,7 +1602,7 @@ export class BotInstance extends EventEmitter {
       const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
       return `无法播放专辑: ${cmd.args}\n${d.status}\n${d.hint}`;
     }
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdFm(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1644,7 +1644,7 @@ export class BotInstance extends EventEmitter {
       return `无法播放FM\n${d.status}\n${d.hint}`;
     }
     const label = provider.platform === "qq" ? "QQ Radar FM" : "Personal FM";
-    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}`;
+    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdArtist(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1682,7 +1682,7 @@ export class BotInstance extends EventEmitter {
       const d = await this.getAuthDiag(provider.platform as "netease" | "qq");
       return `无法播放: ${cmd.args}\n${d.status}\n${d.hint}`;
     }
-    return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}`;
+    return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async refillFm(): Promise<void> {
@@ -1790,6 +1790,29 @@ export class BotInstance extends EventEmitter {
       hint = "请在WebUI设置页检查音乐平台登录状态及VIP是否有效";
     }
     return { status: parts.join("，"), hint };
+  }
+
+  private async getTrialWarning(song: { fee?: number; platform: string }): Promise<string> {
+    if (song.platform !== "netease" || song.fee !== 1) return "";
+    this.logger.info({ songId: (song as any).id, songName: (song as any).name, fee: song.fee }, "VIP song trial detected");
+    const auth = await this.neteaseProvider.getAuthStatus().catch(() => ({ loggedIn: false }));
+    if (!auth.loggedIn) return "\n⚠️ 试听中，完整版请在WebUI登录网易云";
+    let hasVip = false;
+    try {
+      const accRes = await (this.neteaseProvider as any).api.get("/user/account", {
+        params: { cookie: this.neteaseProvider.getCookie() },
+      });
+      const vt: number = accRes.data?.data?.profile?.vipType ?? accRes.data?.profile?.vipType ?? 0;
+      hasVip = vt === 11 || vt === 110 || vt === 10;
+    } catch { /* ignore */ }
+    if (!hasVip) return "\n⚠️ 试听中，完整版请开通黑胶VIP";
+    return "";
+  }
+
+  private async checkTrialWarning(): Promise<string> {
+    const song = this.queue.current();
+    if (!song) return "";
+    return this.getTrialWarning(song);
   }
 
   private async cmdFollow(msg?: TS3TextMessage): Promise<string> {
