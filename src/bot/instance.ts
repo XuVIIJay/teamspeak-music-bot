@@ -1,8 +1,11 @@
 import { EventEmitter } from "node:events";
 import {
   TS3Client,
+  escapeTS3,
   type TS3ClientOptions,
   type TS3TextMessage,
+  type ClientInfo,
+  type ClientMovedEvent,
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
@@ -68,6 +71,9 @@ export class BotInstance extends EventEmitter {
   private channelUserCount = 0;
   private profileManager: BotProfileManager;
   private isFmMode = false;
+  private suppressWelcomeUntil = 0;
+  private defaultChannelName: string;
+  private defaultChannelId: bigint = 0n;
 
   constructor(options: BotInstanceOptions) {
     super();
@@ -85,6 +91,7 @@ export class BotInstance extends EventEmitter {
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
     this.queue = new PlayQueue();
+    this.defaultChannelName = options.tsOptions.defaultChannel ?? "";
 
     const profileConfig = this.database.getProfileConfig(this.id);
     this.profileManager = new BotProfileManager(
@@ -150,9 +157,200 @@ export class BotInstance extends EventEmitter {
       this.emit("disconnected");
     });
 
+    // 机器人切换频道后 3 秒内不发送欢迎
+    this.tsClient.on("channelChanged", () => {
+      this.suppressWelcomeUntil = Date.now() + 3000;
+    });
+
+    // connected 事件中缓存默认频道 ID
     this.tsClient.on("connected", () => {
       this._startIdlePoller();
+      this.tsClient.getDefaultChannelId().then((id) => {
+        this.defaultChannelId = id;
+      }).catch(() => {});
     });
+
+    // 监听 clientEnter（用户进入机器人所在频道或默认频道）
+    this.tsClient.on("clientEnter", (info: ClientInfo) => {
+      this._handleClientEnter(info).catch((err) => {
+        this.logger.error({ err }, "Welcome error on clientEnter");
+      });
+    });
+
+    // 监听 clientMoved（用户切换频道）
+    this.tsClient.on("clientMoved", async (event: ClientMovedEvent) => {
+      await this._handleClientMoved(event);
+    });
+  }
+
+  // ─────────────────────────────────────────────
+  //  clientEnter 处理
+  // ─────────────────────────────────────────────
+
+  private async _handleClientEnter(info: ClientInfo): Promise<void> {
+    this.logger.info({ nickname: info.nickname, clientId: info.id, channelID: info.channelID }, "clientEnter event");
+    if (info.id === this.tsClient.botClientId) {
+      this.logger.info({ nickname: info.nickname, clientId: info.id }, "clientEnter skipped (self)");
+      return;
+    }
+    if (Date.now() < this.suppressWelcomeUntil) {
+      this.logger.info({ nickname: info.nickname }, "clientEnter suppressed (cooldown)");
+      return;
+    }
+    if (!this.profileManager.getConfig().welcomeEnabled) {
+      this.logger.info("clientEnter skipped (welcome disabled)");
+      return;
+    }
+
+    // 验证用户是否真的在机器人当前频道
+    const clients = await this.tsClient.getClientsInChannel();
+    const isInMyChannel = clients.some((c) => c.id === info.id);
+
+    if (!isInMyChannel) {
+      // 即使不在本频道，也检查用户是否进入了默认频道
+      if (this.defaultChannelId === 0n) {
+        this.defaultChannelId = await this.tsClient.getDefaultChannelId();
+      }
+      if (this.defaultChannelId !== 0n) {
+        try {
+          const userInfo = await this.tsClient.findClientInfo(info.id);
+          if (userInfo && userInfo.channelID === this.defaultChannelId) {
+            this.logger.info({ nickname: info.nickname }, "clientEnter → server welcome (default channel)");
+            await this._sendServerWelcome(info.nickname);
+          }
+        } catch (err) {
+          this.logger.error({ err }, "clientEnter fallback error");
+        }
+      }
+      return;
+    }
+
+    // 频道欢迎（不依赖 myChannelId，直接用 info 中的频道 ID）
+    const channelId = info.channelID !== 0n
+      ? info.channelID
+      : await this.tsClient.getMyChannelId();
+    this.logger.info({ nickname: info.nickname, channelId }, "clientEnter → channel welcome");
+    await this._sendChannelWelcome(info.nickname, channelId);
+
+    // 服务器欢迎：仅当本机器人所在频道 == 默认频道
+    if (this.defaultChannelId === 0n) {
+      this.defaultChannelId = await this.tsClient.getDefaultChannelId();
+    }
+    if (this.defaultChannelId !== 0n && channelId === this.defaultChannelId) {
+      this.logger.info({ nickname: info.nickname }, "clientEnter → server welcome (bot in default channel)");
+      await this._sendServerWelcome(info.nickname);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  clientMoved 处理
+  // ─────────────────────────────────────────────
+
+  private async _handleClientMoved(
+    event: ClientMovedEvent
+  ): Promise<void> {
+    this.logger.info({ clientId: event.id, targetChannelID: event.targetChannelID }, "clientMoved event");
+    if (event.id === this.tsClient.botClientId) {
+      this.logger.info({ clientId: event.id }, "clientMoved skipped (self)");
+      return;
+    }
+    if (!this.profileManager.getConfig().welcomeEnabled) {
+      this.logger.info("clientMoved skipped (welcome disabled)");
+      return;
+    }
+    const myChannelId = await this.tsClient.getMyChannelId();
+    let enteredChannelId = event.targetChannelID;
+
+    // 如果底层库返回 0，通过 listClients 查找用户实际所在频道
+    if (enteredChannelId === 0n) {
+      const found = await this.tsClient.findClientInfo(event.id);
+      if (found) enteredChannelId = found.channelID;
+    }
+
+    // 查找用户昵称
+    let nickname: string | null = null;
+
+    // 情况 A: 用户可能进入本机器人频道
+    const sameChannel = enteredChannelId !== 0n
+      ? enteredChannelId === myChannelId
+      : true; // 无法确定频道 ID 时，尝试欢迎
+    if (sameChannel) {
+      const channelClients = await this.tsClient.getClientsInChannel();
+      const moved = channelClients.find((c) => c.id === event.id);
+      if (moved) nickname = moved.nickname;
+      if (!nickname) {
+        const info = await this.tsClient.findClientInfo(event.id);
+        if (info) nickname = info.nickname;
+      }
+    }
+
+    // 情况 B: 用户进入默认频道 → 服务器欢迎
+    const isDefaultEnter = this.defaultChannelId !== 0n
+      && enteredChannelId === this.defaultChannelId;
+
+    if (isDefaultEnter && !nickname) {
+      const info = await this.tsClient.findClientInfo(event.id);
+      if (info) nickname = info.nickname;
+    }
+
+    if (!nickname) {
+      this.logger.info({ clientId: event.id }, "clientMoved no nickname, skip");
+      return;
+    }
+
+    // 频道欢迎
+    if (sameChannel) {
+      this.logger.info({ nickname, channelId: myChannelId }, "clientMoved → channel welcome");
+      await this._sendChannelWelcome(nickname, myChannelId);
+    }
+
+    // 服务器欢迎
+    if (isDefaultEnter) {
+      this.logger.info({ nickname }, "clientMoved → server welcome");
+      await this._sendServerWelcome(nickname);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  发送频道欢迎消息
+  // ─────────────────────────────────────────────
+
+  private async _sendChannelWelcome(
+    nickname: string, channelId: bigint
+  ): Promise<void> {
+    const channelName = await this.tsClient.getChannelName(channelId)
+      || this.defaultChannelName || "当前频道";
+
+    const msg = `🎵欢迎🎈${nickname}🎈加入${channelName}，🎶 !help 获取播放指令，玩的开心哦🍬`;
+    this.logger.info({ nickname, channelName, channelId }, "SEND channel welcome");
+
+    try {
+      await this.tsClient.execCommand(
+        `sendtextmessage targetmode=2 target=0 msg=${escapeTS3(msg)}`
+      );
+    } catch (err) {
+      this.logger.error({ err }, "Failed to send channel welcome");
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  发送服务器欢迎消息
+  // ─────────────────────────────────────────────
+
+  private async _sendServerWelcome(nickname: string): Promise<void> {
+    try {
+      const serverName = await this.tsClient.getServerName();
+
+      const msg = `🎉欢迎🎈${nickname}🎈加入${serverName}！🎵使用💬!ai 与我对话聊天哦✨`
+        + `\n🔔  在下方选择频道聊天框互动吧  🔔`;
+      this.logger.info({ nickname, serverName }, "SEND server welcome");
+
+      await this.tsClient.execCommand(
+        `sendtextmessage targetmode=3 target=0 msg=${escapeTS3(msg)}`
+      );
+    } catch (err) {
+      this.logger.error({ err }, "Failed to send server welcome");
+    }
   }
 
   async connect(): Promise<void> {
