@@ -130,6 +130,7 @@ export class NeteaseProvider implements MusicProvider {
         duration: Math.round((s.dt ?? 0) / 1000),
         coverUrl: s.al?.picUrl ?? "",
         platform: "netease",
+        fee: s.fee ?? 0,
       })
     );
 
@@ -170,6 +171,7 @@ export class NeteaseProvider implements MusicProvider {
       duration: Math.round((s.dt ?? 0) / 1000),
       coverUrl: s.al?.picUrl ?? "",
       platform: "netease",
+      fee: s.fee ?? 0,
     };
   }
 
@@ -185,6 +187,7 @@ export class NeteaseProvider implements MusicProvider {
       duration: Math.round((s.dt ?? 0) / 1000),
       coverUrl: s.al?.picUrl ?? "",
       platform: "netease",
+      fee: s.fee ?? 0,
     }));
   }
 
@@ -213,6 +216,7 @@ export class NeteaseProvider implements MusicProvider {
       duration: Math.round((s.dt ?? 0) / 1000),
       coverUrl: s.al?.picUrl ?? "",
       platform: "netease",
+      fee: s.fee ?? 0,
     }));
   }
 
@@ -320,6 +324,7 @@ export class NeteaseProvider implements MusicProvider {
       duration: Math.round((s.duration ?? 0) / 1000),
       coverUrl: s.album?.picUrl ?? "",
       platform: "netease",
+      fee: s.fee ?? 0,
     }));
   }
 
@@ -335,6 +340,7 @@ export class NeteaseProvider implements MusicProvider {
       duration: Math.round((s.dt ?? 0) / 1000),
       coverUrl: s.al?.picUrl ?? "",
       platform: "netease",
+      fee: s.fee ?? 0,
     }));
   }
 
