@@ -22,7 +22,7 @@ cd teamspeak-music-bot
 
 ### 1. 安装 Node.js
 
-从 https://nodejs.cn 下载 Node.js 20 LTS 版本并安装。
+从 https://nodejs.cn 下载 Node.js 22 LTS 版本并安装(24或其他版本可能不适配安装脚本，可选择降级或手动安装)。
 
 ### 2. 安装
 
