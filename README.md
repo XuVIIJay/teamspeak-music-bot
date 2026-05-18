@@ -1,6 +1,6 @@
 # 作者自用版新添功能介绍
 
-此fork项目基于https://github.com/ZHANGTIANYAO1/teamspeak-music-bot开发
+此fork项目基于https://github.com/ZHANGTIANYAO1/teamspeak-music-bot
   
 ## 一、AI 对话功能
 
