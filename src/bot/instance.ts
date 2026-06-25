@@ -805,7 +805,7 @@ export class BotInstance extends EventEmitter {
     if (first) ok = await this.resolveAndPlay(first);
     this.emit("stateChange");
     if (!ok) {
-      const d = await this.getAuthDiag(first.platform as "netease" | "qq");
+      const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
       return `无法播放歌单: ${cmd.args}\n${d.status}\n${d.hint}`;
     }
     return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
@@ -845,7 +845,7 @@ export class BotInstance extends EventEmitter {
     if (first) ok = await this.resolveAndPlay(first);
     this.emit("stateChange");
     if (!ok) {
-      const d = await this.getAuthDiag(first.platform as "netease" | "qq");
+      const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
       return `无法播放专辑: ${cmd.args}\n${d.status}\n${d.hint}`;
     }
     return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
@@ -920,7 +920,7 @@ export class BotInstance extends EventEmitter {
     if (first) ok = await this.resolveAndPlay(first);
     this.emit("stateChange");
     if (!ok) {
-      const d = await this.getAuthDiag(first.platform as "netease" | "qq");
+      const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
       return `无法播放: ${cmd.args}\n${d.status}\n${d.hint}`;
     }
     return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
