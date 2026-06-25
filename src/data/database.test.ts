@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createDatabase, type BotDatabase, type BotInstance, type PlayHistoryEntry } from "./database.js";
+import { createUserStore, GUEST_USER_ID } from "./users.js";
 
 describe("database", () => {
   let botDb: BotDatabase;
@@ -21,6 +25,30 @@ describe("database", () => {
     const names = tables.map((t) => t.name);
     expect(names).toContain("play_history");
     expect(names).toContain("bot_instances");
+  });
+
+  it("creates users and sessions tables on init", () => {
+    const tables = botDb.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const names = tables.map((t) => t.name);
+    expect(names).toContain("users");
+    expect(names).toContain("sessions");
+
+    const userCols = botDb.db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+    const userColNames = userCols.map((c) => c.name).sort();
+    expect(userColNames).toEqual(["createdAt", "id", "passwordHash", "role", "updatedAt", "username"]);
+
+    const sessionCols = botDb.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    const sessionColNames = sessionCols.map((c) => c.name).sort();
+    expect(sessionColNames).toEqual(["createdAt", "expiresAt", "id", "lastSeenAt", "userId"]);
+  });
+
+  it("creates user_audit table on init", () => {
+    const tables = botDb.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    expect(tables.map((t) => t.name)).toContain("user_audit");
   });
 
   it("records and retrieves play history", () => {
@@ -58,6 +86,7 @@ describe("database", () => {
       serverPort: 9987,
       nickname: "MusicBot",
       defaultChannel: "Music",
+      channelId: "",
       channelPassword: "",
       autoStart: true,
       serverProtocol: "",
@@ -87,6 +116,7 @@ describe("database", () => {
       serverPort: 9987,
       nickname: "MusicBot",
       defaultChannel: "Music",
+      channelId: "",
       channelPassword: "",
       autoStart: false,
       serverProtocol: "",
@@ -107,6 +137,7 @@ describe("database", () => {
       serverPort: 9987,
       nickname: "n",
       defaultChannel: "",
+      channelId: "",
       channelPassword: "",
       autoStart: false,
       serverProtocol: "",
@@ -119,5 +150,30 @@ describe("database", () => {
     expect(botDb.getCustomAvatarPath("bot-1")).toBe("avatars/bot-1.png");
     botDb.setCustomAvatarPath("bot-1", null);
     expect(botDb.getCustomAvatarPath("bot-1")).toBeNull();
+  });
+});
+
+describe("guest principal migration", () => {
+  it("creates exactly one reserved guest row, idempotently", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tsmb-db-"));
+    const p = join(dir, "t.db");
+    const a = createDatabase(p); a.db.close();
+    const b = createDatabase(p); // run again — must not duplicate
+    const row = b.db.prepare("SELECT id, role FROM users WHERE id = ?").get(GUEST_USER_ID) as { id: string; role: string } | undefined;
+    expect(row?.role).toBe("guest");
+    const n = (b.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='guest'").get() as { n: number }).n;
+    expect(n).toBe(1);
+    b.db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("guest row does not break first-run detection (countUsers excludes it)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "tsmb-db2-"));
+    const p = join(dir, "t.db");
+    const d = createDatabase(p);
+    const users = createUserStore(d.db);
+    expect(users.countUsers()).toBe(0); // guest excluded → still needs setup
+    d.db.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

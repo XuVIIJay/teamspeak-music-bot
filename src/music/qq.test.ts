@@ -1,7 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { mapQqAlbums } from "./qq.js";
+import { mapQqAlbums, mapQqSongs } from "./qq.js";
 
 describe("QQ adapter", () => {
+  it("mapQqSongs maps QQMusicApi-style song entries", () => {
+    const out = mapQqSongs([
+      {
+        mid: "001abc",
+        name: "Radar Song",
+        singer: [{ name: "Singer A" }, { name: "Singer B" }],
+        album: { name: "Album A", mid: "alb001" },
+        interval: 243,
+      },
+    ]);
+
+    expect(out).toEqual([
+      {
+        id: "001abc",
+        name: "Radar Song",
+        artist: "Singer A / Singer B",
+        album: "Album A",
+        duration: 243,
+        coverUrl: "https://y.gtimg.cn/music/photo_new/T002R300x300M000alb001.jpg",
+        platform: "qq",
+      },
+    ]);
+  });
+
   it("mapQqAlbums maps albumMID-style raw entries", () => {
     const raw = [
       {

@@ -21,8 +21,37 @@
       </div>
     </section>
 
-    <!-- Bot Management -->
+    <!-- Account: own password change -->
     <section class="settings-section">
+      <h2 class="section-title">账户</h2>
+      <div class="account-info-card">
+        <div class="account-row">
+          <span class="account-label">用户名</span>
+          <span class="account-value">{{ session.currentUser.value?.username ?? '—' }}</span>
+        </div>
+        <div class="account-row">
+          <span class="account-label">角色</span>
+          <span class="account-value">
+            <span class="user-role-badge" :class="`role-${session.currentUser.value?.role}`">
+              {{ session.currentUser.value?.role === 'admin' ? '管理员' : '成员' }}
+            </span>
+          </span>
+        </div>
+      </div>
+      <form class="change-pw-form" @submit.prevent="onChangeOwnPassword">
+        <input v-model="ownPw.old" type="password" autocomplete="current-password" class="input" placeholder="当前密码" required />
+        <input v-model="ownPw.new" type="password" autocomplete="new-password" minlength="8" class="input" placeholder="新密码 (≥8 位)" required />
+        <input v-model="ownPw.confirm" type="password" autocomplete="new-password" minlength="8" class="input" placeholder="再次输入新密码" required />
+        <button class="btn-sm btn-primary" type="submit" :disabled="changingOwnPw">
+          {{ changingOwnPw ? '更新中…' : '修改密码' }}
+        </button>
+      </form>
+      <p v-if="ownPwError" class="user-error">{{ ownPwError }}</p>
+      <p v-if="ownPwSuccess" class="user-success">{{ ownPwSuccess }}</p>
+    </section>
+
+    <!-- Bot Management (create/edit/delete/start-stop) requires bot.manage -->
+    <section v-if="can('bot.manage')" class="settings-section">
       <h2 class="section-title">机器人管理</h2>
       <div class="bot-list">
         <div v-for="bot in store.bots" :key="bot.id" class="bot-item">
@@ -69,8 +98,12 @@
             </div>
           </div>
           <div class="form-group">
-            <label>默认频道（可选）</label>
-            <input v-model="editForm.defaultChannel" class="input" placeholder="音乐频道" />
+            <label>默认频道名称（可选）</label>
+            <input v-model="editForm.defaultChannel" :disabled="!!editForm.channelId" class="input" :class="{ disabled: !!editForm.channelId }" placeholder="音乐频道" />
+          </div>
+          <div class="form-group">
+            <label>默认频道ID（可选）</label>
+            <input v-model="editForm.channelId" :disabled="!!editForm.defaultChannel" class="input" :class="{ disabled: !!editForm.defaultChannel }" placeholder="如 12" />
           </div>
           <div class="form-group">
             <label>频道密码（可选）</label>
@@ -113,8 +146,12 @@
           <input v-model="newBotNickname" class="input" placeholder="MusicBot" />
         </div>
         <div class="form-group">
-          <label>默认频道（可选）</label>
-          <input v-model="newBotChannel" class="input" placeholder="音乐频道" />
+          <label>默认频道名称（可选）</label>
+          <input v-model="newBotChannel" :disabled="!!newBotChannelId" class="input" :class="{ disabled: !!newBotChannelId }" placeholder="音乐频道" />
+        </div>
+        <div class="form-group">
+          <label>默认频道ID（可选）</label>
+          <input v-model="newBotChannelId" :disabled="!!newBotChannel" class="input" :class="{ disabled: !!newBotChannel }" placeholder="如 12" />
         </div>
         <div class="form-group">
           <label>服务器密码（可选）</label>
@@ -128,8 +165,8 @@
       </div>
     </section>
 
-    <!-- Music Account - QR Code Login -->
-    <section class="settings-section">
+    <!-- Music Account - QR Code Login (platform auth) requires platform.auth -->
+    <section v-if="can('platform.auth')" class="settings-section">
       <h2 class="section-title">音乐账号</h2>
 
       <!-- NetEase -->
@@ -342,8 +379,8 @@
       </div>
     </section>
 
-    <!-- Audio Quality -->
-    <section class="settings-section">
+    <!-- Audio Quality requires quality -->
+    <section v-if="can('quality')" class="settings-section">
       <h2 class="section-title">音质设置</h2>
       <div class="setting-row">
         <div class="setting-label">
@@ -379,16 +416,16 @@
         </div>
       </div>
     </section>
-    
+
     <!-- Idle Timeout -->
-    <section class="settings-section">
+    <section v-if="can('bot.manage')" class="settings-section">
       <h2 class="section-title">行为设置</h2>
       <div class="setting-row">
         <div class="setting-label">
           <Icon icon="mdi:timer-off-outline" class="setting-icon" />
           <div>
             <div>闲置自动退出</div>
-            <div style="font-size:12px; opacity:0.6; margin-top:2px">频道无人时，机器人自动断开的等待时间（0 = 不退出）</div>
+            <div style="font-size:12px; opacity:0.6; margin-top:2px">服务器上没有其他人时，机器人自动断开的等待时间（0 = 不退出）</div>
           </div>
         </div>
         <div class="prefix-input-wrap">
@@ -404,10 +441,71 @@
           <button class="btn-primary" @click="saveIdleTimeout">保存</button>
         </div>
       </div>
+      <label class="profile-toggle behavior-toggle">
+        <div class="profile-toggle-text">
+          <div class="profile-toggle-label">无人时自动暂停播放</div>
+          <div class="profile-toggle-hint">服务器上只剩机器人自己时自动暂停，有人连接后自动继续播放（受协议限制，占用判断以整个服务器为准，无法精确到单个频道）</div>
+        </div>
+        <input
+          v-model="autoPauseOnEmpty"
+          type="checkbox"
+          class="profile-toggle-switch"
+          @change="saveAutoPause"
+        />
+      </label>
+    </section>
+
+    <!-- Guest Mode (admin only) -->
+    <section v-if="session.isAdmin.value" class="settings-section">
+      <h2 class="section-title">游客模式</h2>
+      <p class="profile-section-hint">开启后，访客无需登录即可进入并点歌（默认关闭）。游客永远无法查看或修改设置。下面逐项决定游客可用的能力。</p>
+
+      <label class="profile-toggle behavior-toggle">
+        <div class="profile-toggle-text">
+          <div class="profile-toggle-label">允许游客访问</div>
+          <div class="profile-toggle-hint">登录页会出现「以游客身份进入」。关闭后所有游客会话立即失效。</div>
+        </div>
+        <input v-model="guestMode.enabled" type="checkbox" class="profile-toggle-switch" />
+      </label>
+
+      <div v-if="guestMode.enabled" class="perm-group">
+        <div class="perm-group-title">游客权限</div>
+        <div class="perm-checks">
+          <label v-for="f in GUEST_FLAGS" :key="f.token" class="perm-check">
+            <input type="checkbox" v-model="guestMode.permissions[f.token]" />
+            {{ f.label }}
+          </label>
+        </div>
+      </div>
+
+      <div v-if="guestMode.enabled" class="perm-group">
+        <div class="perm-group-title">可控制的机器人</div>
+        <label class="perm-check">
+          <input type="checkbox" v-model="guestMode.botsAll" />
+          全部机器人
+        </label>
+        <div v-if="!guestMode.botsAll" class="perm-checks perm-bots">
+          <label v-for="bot in store.bots" :key="bot.id" class="perm-check">
+            <input
+              type="checkbox"
+              :checked="guestMode.selectedBotIds.includes(bot.id)"
+              @change="toggleGuestBot(bot.id, ($event.target as HTMLInputElement).checked)"
+            />
+            {{ bot.name }}
+          </label>
+          <span v-if="store.bots.length === 0" class="user-empty">还没有机器人。</span>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn-primary" :disabled="guestSaving" @click="saveGuestMode">
+          {{ guestSaving ? '保存中…' : '保存' }}
+        </button>
+      </div>
     </section>
 
     <!-- Bot Profile (TeamSpeak Behavior) -->
-    <section class="settings-section">
+    <section v-if="can('bot.manage')" class="settings-section">
       <h2 class="section-title">机器人 Profile（TeamSpeak 行为）</h2>
       <p class="profile-section-hint">控制 bot 在 TeamSpeak 上自动同步歌曲信息的方式。⚠️ 标记的项会触发频道里所有人的提示音。</p>
       <div v-if="store.bots.length === 0" class="empty-hint">还没有机器人，先在上面创建一个。</div>
@@ -458,6 +556,158 @@
         </div>
       </div>
     </section>
+
+    <!-- User Management -->
+    <section v-if="session.isAdmin.value" class="settings-section">
+      <h2 class="section-title">用户管理</h2>
+      <div class="user-list">
+        <div v-for="u in userList" :key="u.id" class="user-row-wrap">
+          <div class="user-item">
+            <div class="user-info">
+              <div class="user-name">
+                {{ u.username }}
+                <span class="user-role-badge" :class="`role-${u.role}`">
+                  {{ u.role === 'admin' ? '管理员' : '成员' }}
+                </span>
+                <span v-if="session.currentUser.value && u.id === session.currentUser.value.id" class="user-self-badge">本人</span>
+              </div>
+              <div class="user-created">创建于 {{ formatDate(u.createdAt) }}</div>
+            </div>
+            <div class="user-actions">
+              <span v-if="u.role === 'admin'" class="perm-admin-label">全部权限（管理员）</span>
+              <button
+                v-else
+                class="btn-sm"
+                :class="{ 'btn-primary': permEditingId === u.id }"
+                @click="onTogglePermEditor(u)"
+              >
+                <Icon icon="mdi:shield-key" /> 权限
+              </button>
+              <button class="btn-sm" @click="openResetPassword(u)">
+                <Icon icon="mdi:lock-reset" /> 重置密码
+              </button>
+              <button
+                class="btn-sm"
+                :disabled="changingRoleId === u.id || isLastAdmin(u)"
+                :title="isLastAdmin(u) ? '不能降级唯一的管理员' : (u.role === 'admin' ? '降级为成员' : '提升为管理员')"
+                @click="onToggleRole(u)"
+              >
+                <Icon icon="mdi:account-cog" />
+                {{ u.role === 'admin' ? '降为成员' : '提升管理员' }}
+              </button>
+              <button
+                class="btn-sm btn-delete"
+                :disabled="!!(session.currentUser.value && u.id === session.currentUser.value.id) || isLastAdmin(u)"
+                :title="session.currentUser.value && u.id === session.currentUser.value.id ? '不能删除自己' : (isLastAdmin(u) ? '不能删除唯一的管理员' : '')"
+                @click="onDeleteUser(u)"
+              >
+                <Icon icon="mdi:delete" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Inline permission editor (members only) -->
+          <div v-if="permEditingId === u.id" class="perm-editor">
+            <div v-if="permLoading" class="user-empty">加载权限中…</div>
+            <template v-else>
+              <div class="perm-group">
+                <div class="perm-group-title">能力</div>
+                <div class="perm-checks">
+                  <label v-for="cap in CAPABILITIES" :key="cap.token" class="perm-check">
+                    <input
+                      type="checkbox"
+                      :checked="permDraft.capabilities.includes(cap.token)"
+                      @change="toggleCapability(cap.token, ($event.target as HTMLInputElement).checked)"
+                    />
+                    {{ cap.label }}
+                  </label>
+                </div>
+              </div>
+
+              <div class="perm-group">
+                <div class="perm-group-title">机器人</div>
+                <label class="perm-check">
+                  <input type="checkbox" v-model="permDraft.botsAll" />
+                  全部机器人
+                </label>
+                <div v-if="!permDraft.botsAll" class="perm-checks perm-bots">
+                  <label v-for="bot in store.bots" :key="bot.id" class="perm-check">
+                    <input
+                      type="checkbox"
+                      :checked="permDraft.selectedBotIds.includes(bot.id)"
+                      @change="toggleBotSelection(bot.id, ($event.target as HTMLInputElement).checked)"
+                    />
+                    {{ bot.name }}
+                  </label>
+                  <span v-if="store.bots.length === 0" class="user-empty">还没有机器人。</span>
+                </div>
+              </div>
+
+              <p v-if="permError" class="user-error">{{ permError }}</p>
+              <div class="form-actions">
+                <button class="btn-sm" @click="permEditingId = null">取消</button>
+                <button class="btn-sm btn-primary" :disabled="permSaving" @click="onSavePermissions(u)">
+                  {{ permSaving ? '保存中…' : '保存' }}
+                </button>
+              </div>
+            </template>
+          </div>
+        </div>
+        <div v-if="userList.length === 0 && !userLoadError" class="user-empty">加载中…</div>
+        <div v-if="userLoadError" class="user-error">{{ userLoadError }}</div>
+      </div>
+
+      <form class="user-add-form" @submit.prevent="onCreateUser">
+        <input v-model="newUser.username" class="input" placeholder="新用户名 (3-32 字符)" required />
+        <input v-model="newUser.password" type="password" class="input" placeholder="密码 (≥8 位)" minlength="8" required />
+        <select v-model="newUser.role" class="input user-role-select">
+          <option value="member">成员</option>
+          <option value="admin">管理员</option>
+        </select>
+        <button class="btn-sm btn-primary" type="submit" :disabled="creatingUser">
+          {{ creatingUser ? '创建中…' : '添加用户' }}
+        </button>
+      </form>
+      <p v-if="userMutationError" class="user-error">{{ userMutationError }}</p>
+
+      <!-- Reset password modal -->
+      <div v-if="resetTarget" class="edit-modal-overlay" @click.self="resetTarget = null">
+        <div class="edit-modal">
+          <h3 class="modal-title">重置 {{ resetTarget.username }} 的密码</h3>
+          <p class="modal-hint">该用户的所有会话将被强制下线。</p>
+          <div class="form-group">
+            <label>新密码 (≥8 位)</label>
+            <input v-model="resetPassword" type="password" class="input" minlength="8" />
+          </div>
+          <p v-if="resetError" class="user-error">{{ resetError }}</p>
+          <div class="form-actions">
+            <button class="btn-sm" @click="resetTarget = null">取消</button>
+            <button class="btn-sm btn-primary" :disabled="resettingPw" @click="onConfirmReset">
+              {{ resettingPw ? '保存中…' : '确认重置' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Audit Log -->
+    <section v-if="session.isAdmin.value" class="settings-section">
+      <h2 class="section-title">
+        操作审计
+        <button class="audit-refresh-btn" @click="loadAudit" :disabled="auditLoading" title="刷新">
+          <Icon icon="mdi:refresh" :class="{ spinning: auditLoading }" />
+        </button>
+      </h2>
+      <div v-if="auditLoadError" class="user-error">{{ auditLoadError }}</div>
+      <div v-else-if="auditEntries.length === 0 && !auditLoading" class="user-empty">暂无操作记录</div>
+      <div v-else class="audit-list">
+        <div v-for="e in auditEntries" :key="e.id" class="audit-row">
+          <div class="audit-time">{{ formatDateTime(e.timestamp) }}</div>
+          <div class="audit-actor">{{ e.actorUsername ?? '—' }}</div>
+          <div class="audit-action" :class="auditActionClass(e.action)">{{ describeAction(e) }}</div>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -469,6 +719,7 @@ import AvatarUpload from '../components/AvatarUpload.vue';
 import CustomAvatarRow from '../components/CustomAvatarRow.vue';
 import QRCode from 'qrcode';
 import { usePlayerStore } from '../stores/player.js';
+import { useSession } from '../composables/useSession.js';
 
 const store = usePlayerStore();
 
@@ -491,6 +742,7 @@ const newBotServer = ref('');
 const newBotPort = ref(9987);
 const newBotNickname = ref('MusicBot');
 const newBotChannel = ref('');
+const newBotChannelId = ref('');
 const newBotServerPassword = ref('');
 const newBotAvatar = ref<string | null>(null);
 
@@ -502,6 +754,7 @@ const editForm = reactive({
   serverPort: 9987,
   nickname: '',
   defaultChannel: '',
+  channelId: '',
   channelPassword: '',
   serverPassword: '',
 });
@@ -659,6 +912,7 @@ async function createBot() {
       serverPort: newBotPort.value || 9987,
       nickname: newBotNickname.value || newBotName.value,
       defaultChannel: newBotChannel.value || undefined,
+      channelId: newBotChannelId.value || undefined,
       serverPassword: newBotServerPassword.value || undefined,
       autoStart: false,
     });
@@ -674,6 +928,7 @@ async function createBot() {
     newBotPort.value = 9987;
     newBotNickname.value = 'MusicBot';
     newBotChannel.value = '';
+    newBotChannelId.value = '';
     newBotServerPassword.value = '';
     newBotAvatar.value = null;
     await store.fetchBots();
@@ -707,6 +962,7 @@ async function openEditBot(bot: any) {
     editForm.serverPort = res.data.serverPort ?? 9987;
     editForm.nickname = res.data.nickname ?? '';
     editForm.defaultChannel = res.data.defaultChannel ?? '';
+    editForm.channelId = res.data.channelId ?? '';
     editForm.channelPassword = res.data.channelPassword ?? '';
     editForm.serverPassword = res.data.serverPassword ?? '';
   } catch {
@@ -715,6 +971,7 @@ async function openEditBot(bot: any) {
     editForm.serverPort = 9987;
     editForm.nickname = bot.name;
     editForm.defaultChannel = '';
+    editForm.channelId = '';
     editForm.channelPassword = '';
     editForm.serverPassword = '';
   }
@@ -761,11 +1018,15 @@ async function savePrefix() {
 
 // Idle timeout
 const idleTimeout = ref(0);
+// Defaults OFF to match the backend default (config.ts getDefaultConfig).
+const autoPauseOnEmpty = ref(false);
 
 async function loadIdleTimeout() {
   try {
     const res = await axios.get('/api/bot/settings');
     idleTimeout.value = res.data.idleTimeoutMinutes ?? 0;
+    autoPauseOnEmpty.value = res.data.autoPauseOnEmpty ?? false;
+    applyGuestModeFromServer(res.data.guestMode);
   } catch { /* ignore */ }
 }
 
@@ -773,6 +1034,62 @@ async function saveIdleTimeout() {
   try {
     await axios.post('/api/bot/settings', { idleTimeoutMinutes: idleTimeout.value });
   } catch { /* ignore */ }
+}
+
+async function saveAutoPause() {
+  try {
+    await axios.post('/api/bot/settings', { autoPauseOnEmpty: autoPauseOnEmpty.value });
+  } catch { /* ignore */ }
+}
+
+// --- Guest mode (admin only) ---
+const GUEST_FLAGS: { token: string; label: string }[] = [
+  { token: 'addToQueue', label: '添加到队列末尾' },
+  { token: 'playNext', label: '添加到下一首' },
+  { token: 'playNow', label: '立即播放（不清空队列）' },
+  { token: 'skip', label: '跳过当前歌曲' },
+  { token: 'transport', label: '暂停/继续/进度/音量' },
+  { token: 'removeClear', label: '移除/清空队列' },
+  { token: 'playMode', label: '切换播放模式 / FM' },
+];
+const guestMode = reactive<{ enabled: boolean; botsAll: boolean; selectedBotIds: string[]; permissions: Record<string, boolean> }>({
+  enabled: false,
+  botsAll: true,
+  selectedBotIds: [],
+  permissions: { addToQueue: true, playNext: false, playNow: false, skip: false, transport: false, removeClear: false, playMode: false },
+});
+const guestSaving = ref(false);
+
+function applyGuestModeFromServer(gm: any) {
+  if (!gm) return;
+  guestMode.enabled = Boolean(gm.enabled);
+  guestMode.botsAll = gm.bots === 'all';
+  guestMode.selectedBotIds = Array.isArray(gm.bots) ? [...gm.bots] : [];
+  for (const f of GUEST_FLAGS) {
+    guestMode.permissions[f.token] = Boolean(gm.permissions?.[f.token]);
+  }
+}
+
+function toggleGuestBot(id: string, checked: boolean) {
+  const has = guestMode.selectedBotIds.includes(id);
+  if (checked && !has) guestMode.selectedBotIds.push(id);
+  else if (!checked && has) guestMode.selectedBotIds = guestMode.selectedBotIds.filter((b) => b !== id);
+}
+
+async function saveGuestMode() {
+  guestSaving.value = true;
+  try {
+    const res = await axios.post('/api/bot/settings', {
+      guestMode: {
+        enabled: guestMode.enabled,
+        bots: guestMode.botsAll ? 'all' : [...guestMode.selectedBotIds],
+        permissions: { ...guestMode.permissions },
+      },
+    });
+    applyGuestModeFromServer(res.data?.guestMode);
+  } catch { /* ignore */ } finally {
+    guestSaving.value = false;
+  }
 }
 
 // --- Bot Profile config ---
@@ -841,11 +1158,329 @@ async function updateProfile(botId: string, key: keyof ProfileConfig, value: boo
   }
 }
 
+// --- User Management ---
+const session = useSession();
+const { can } = session;
+
+// --- Own password change (available to all authenticated users) ---
+const ownPw = reactive({ old: '', new: '', confirm: '' });
+const ownPwError = ref('');
+const ownPwSuccess = ref('');
+const changingOwnPw = ref(false);
+
+async function onChangeOwnPassword() {
+  ownPwError.value = '';
+  ownPwSuccess.value = '';
+  if (ownPw.new !== ownPw.confirm) {
+    ownPwError.value = '两次输入的新密码不一致';
+    return;
+  }
+  if (ownPw.new.length < 8) {
+    ownPwError.value = '新密码至少 8 位';
+    return;
+  }
+  changingOwnPw.value = true;
+  try {
+    const res = await fetch('/api/session/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ oldPassword: ownPw.old, newPassword: ownPw.new }),
+    });
+    if (!res.ok && res.status !== 204) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.error ?? `HTTP ${res.status}`);
+    }
+    ownPw.old = '';
+    ownPw.new = '';
+    ownPw.confirm = '';
+    ownPwSuccess.value = '密码已更新';
+    // The server kills other sessions but keeps the current one. No reload needed.
+  } catch (e) {
+    ownPwError.value = (e as Error).message;
+  } finally {
+    changingOwnPw.value = false;
+  }
+}
+
+interface UserListEntry { id: string; username: string; createdAt: number; role: 'admin' | 'member' }
+const userList = ref<UserListEntry[]>([]);
+const userLoadError = ref('');
+const userMutationError = ref('');
+const newUser = reactive({ username: '', password: '', role: 'member' as 'admin' | 'member' });
+const creatingUser = ref(false);
+const resetTarget = ref<UserListEntry | null>(null);
+const resetPassword = ref('');
+const resetError = ref('');
+const resettingPw = ref(false);
+const changingRoleId = ref<string | null>(null);
+
+function isLastAdmin(u: UserListEntry): boolean {
+  if (u.role !== 'admin') return false;
+  const adminCount = userList.value.filter((x) => x.role === 'admin').length;
+  return adminCount <= 1;
+}
+
+async function onToggleRole(u: UserListEntry) {
+  const newRole = u.role === 'admin' ? 'member' : 'admin';
+  if (!confirm(`确认将 ${u.username} 切换为${newRole === 'admin' ? '管理员' : '成员'}？`)) return;
+  userMutationError.value = '';
+  changingRoleId.value = u.id;
+  try {
+    const res = await fetch(`/api/users/${u.id}/role`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: newRole }),
+    });
+    if (!res.ok && res.status !== 204) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.error ?? `HTTP ${res.status}`);
+    }
+    await loadUsers();
+  } catch (e) {
+    userMutationError.value = (e as Error).message;
+  } finally {
+    changingRoleId.value = null;
+  }
+}
+
+async function loadUsers() {
+  userLoadError.value = '';
+  try {
+    const res = await fetch('/api/users');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    userList.value = body.users ?? [];
+  } catch (e) {
+    userLoadError.value = (e as Error).message;
+  }
+}
+
+async function onCreateUser() {
+  userMutationError.value = '';
+  creatingUser.value = true;
+  try {
+    const res = await fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: newUser.username, password: newUser.password, role: newUser.role }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.error ?? `HTTP ${res.status}`);
+    }
+    newUser.username = '';
+    newUser.password = '';
+    newUser.role = 'member';
+    await loadUsers();
+  } catch (e) {
+    userMutationError.value = (e as Error).message;
+  } finally {
+    creatingUser.value = false;
+  }
+}
+
+async function onDeleteUser(u: UserListEntry) {
+  if (!confirm(`确认删除用户 ${u.username}？`)) return;
+  userMutationError.value = '';
+  try {
+    const res = await fetch(`/api/users/${u.id}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 204) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.error ?? `HTTP ${res.status}`);
+    }
+    await loadUsers();
+  } catch (e) {
+    userMutationError.value = (e as Error).message;
+  }
+}
+
+function openResetPassword(u: UserListEntry) {
+  resetTarget.value = u;
+  resetPassword.value = '';
+  resetError.value = '';
+}
+
+async function onConfirmReset() {
+  if (!resetTarget.value) return;
+  if (resetPassword.value.length < 8) {
+    resetError.value = '密码至少 8 位';
+    return;
+  }
+  resettingPw.value = true;
+  resetError.value = '';
+  try {
+    const res = await fetch(`/api/users/${resetTarget.value.id}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPassword: resetPassword.value }),
+    });
+    if (!res.ok && res.status !== 204) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.error ?? `HTTP ${res.status}`);
+    }
+    resetTarget.value = null;
+  } catch (e) {
+    resetError.value = (e as Error).message;
+  } finally {
+    resettingPw.value = false;
+  }
+}
+
+// --- Per-user permission editor (members only) ---
+const CAPABILITIES: { token: string; label: string }[] = [
+  { token: 'player.control', label: '播放控制' },
+  { token: 'player.queue', label: '队列管理' },
+  { token: 'bot.manage', label: '机器人管理' },
+  { token: 'platform.auth', label: '平台登录凭据' },
+  { token: 'quality', label: '音质设置' },
+];
+
+const permEditingId = ref<string | null>(null);
+const permLoading = ref(false);
+const permSaving = ref(false);
+const permError = ref('');
+const permDraft = reactive<{ capabilities: string[]; botsAll: boolean; selectedBotIds: string[] }>({
+  capabilities: [],
+  botsAll: true,
+  selectedBotIds: [],
+});
+
+async function onTogglePermEditor(u: UserListEntry) {
+  if (permEditingId.value === u.id) {
+    permEditingId.value = null;
+    return;
+  }
+  permEditingId.value = u.id;
+  permError.value = '';
+  permLoading.value = true;
+  permDraft.capabilities = [];
+  permDraft.botsAll = true;
+  permDraft.selectedBotIds = [];
+  try {
+    const res = await fetch(`/api/users/${u.id}/permissions`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    permDraft.capabilities = Array.isArray(body.capabilities) ? [...body.capabilities] : [];
+    if (body.bots === 'all') {
+      permDraft.botsAll = true;
+      permDraft.selectedBotIds = [];
+    } else {
+      permDraft.botsAll = false;
+      permDraft.selectedBotIds = Array.isArray(body.bots) ? [...body.bots] : [];
+    }
+  } catch (e) {
+    permError.value = (e as Error).message;
+  } finally {
+    permLoading.value = false;
+  }
+}
+
+function toggleCapability(token: string, checked: boolean) {
+  const has = permDraft.capabilities.includes(token);
+  if (checked && !has) permDraft.capabilities.push(token);
+  else if (!checked && has) permDraft.capabilities = permDraft.capabilities.filter((t) => t !== token);
+}
+
+function toggleBotSelection(id: string, checked: boolean) {
+  const has = permDraft.selectedBotIds.includes(id);
+  if (checked && !has) permDraft.selectedBotIds.push(id);
+  else if (!checked && has) permDraft.selectedBotIds = permDraft.selectedBotIds.filter((b) => b !== id);
+}
+
+async function onSavePermissions(u: UserListEntry) {
+  permSaving.value = true;
+  permError.value = '';
+  try {
+    const res = await fetch(`/api/users/${u.id}/permissions`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        capabilities: [...permDraft.capabilities],
+        bots: permDraft.botsAll ? 'all' : [...permDraft.selectedBotIds],
+      }),
+    });
+    if (!res.ok && res.status !== 204) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.error ?? `HTTP ${res.status}`);
+    }
+    permEditingId.value = null;
+  } catch (e) {
+    permError.value = (e as Error).message;
+  } finally {
+    permSaving.value = false;
+  }
+}
+
+function formatDate(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// --- Audit Log ---
+interface AuditEntry {
+  id: number;
+  timestamp: number;
+  actorId: string | null;
+  actorUsername: string | null;
+  targetUserId: string | null;
+  targetUsername: string | null;
+  action: string;
+}
+
+const auditEntries = ref<AuditEntry[]>([]);
+const auditLoadError = ref('');
+const auditLoading = ref(false);
+
+async function loadAudit() {
+  auditLoadError.value = '';
+  auditLoading.value = true;
+  try {
+    const res = await fetch('/api/audit?limit=100');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    auditEntries.value = body.entries ?? [];
+  } catch (e) {
+    auditLoadError.value = (e as Error).message;
+  } finally {
+    auditLoading.value = false;
+  }
+}
+
+function formatDateTime(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function describeAction(e: AuditEntry): string {
+  const target = e.targetUsername ?? e.targetUserId ?? '—';
+  switch (e.action) {
+    case 'admin.first_created':     return `创建首位管理员 ${target}`;
+    case 'user.created':            return `创建用户 ${target}`;
+    case 'user.deleted':            return `删除用户 ${target}`;
+    case 'user.password_reset':     return `重置 ${target} 的密码`;
+    case 'user.password_changed':   return `修改自己的密码`;
+    case 'user.role_changed':       return `变更 ${target} 的角色`;
+    case 'user.permissions_changed': return `权限变更 → ${target}`;
+    default:                        return `${e.action} → ${target}`;
+  }
+}
+
+function auditActionClass(action: string): string {
+  if (action === 'user.deleted') return 'audit-action-danger';
+  if (action === 'user.password_reset' || action === 'user.password_changed') return 'audit-action-warn';
+  return 'audit-action-ok';
+}
+
 onMounted(() => {
   store.fetchBots(); // Refresh bot status on page visit
   checkAuthStatus();
   loadQuality();
   loadIdleTimeout();
+  if (session.isAdmin.value) {
+    loadUsers();
+    loadAudit();
+  }
 });
 
 onUnmounted(() => {
@@ -1114,6 +1749,10 @@ onUnmounted(() => {
   font-size: 13px;
   outline: none;
   &:focus { border-color: var(--color-primary); }
+  &.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
 }
 
 .input-sm { max-width: 80px; }
@@ -1439,6 +2078,12 @@ onUnmounted(() => {
   align-items: flex-start;
 }
 
+// Standalone toggle inside 行为设置 (not part of a bordered list)
+.behavior-toggle {
+  border-bottom: none;
+  padding-top: 4px;
+}
+
 @media (max-width: 768px) {
   .profile-bot-header {
     padding: 14px 12px;
@@ -1467,4 +2112,127 @@ onUnmounted(() => {
     }
   }
 }
+
+// --- User Management ---
+.user-list { display: flex; flex-direction: column; gap: 8px; }
+.user-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-sm);
+}
+.user-info { display: flex; flex-direction: column; gap: 4px; }
+.user-name { font-weight: 500; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+.user-self-badge {
+  font-size: 11px; padding: 2px 6px; border-radius: 4px;
+  background: var(--color-primary); color: #fff;
+}
+.user-created { font-size: 12px; color: var(--text-secondary); }
+.user-actions { display: flex; gap: 8px; }
+.user-add-form {
+  display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;
+}
+.user-add-form .input { flex: 1; min-width: 140px; }
+.user-empty, .user-error { font-size: 12px; color: var(--text-secondary); padding: 8px 0; }
+.user-error { color: #e26a6a; }
+.modal-hint { color: var(--text-secondary); font-size: 12px; margin: 0 0 8px; }
+.form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+
+.audit-refresh-btn {
+  margin-left: 10px;
+  border: 0; background: transparent;
+  color: var(--text-secondary); cursor: pointer;
+  display: inline-flex; align-items: center;
+  font-size: 16px;
+  &:hover { color: var(--text-primary); }
+  &:disabled { opacity: 0.5; cursor: progress; }
+}
+.spinning { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.audit-list {
+  display: flex; flex-direction: column;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  max-height: 480px;
+  overflow-y: auto;
+}
+.audit-row {
+  display: grid;
+  grid-template-columns: 170px 120px 1fr;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 13px;
+  &:last-child { border-bottom: 0; }
+}
+.audit-time {
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.audit-actor {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.audit-action { color: var(--text-primary); }
+.audit-action-ok      { color: var(--text-primary); }
+.audit-action-warn    { color: #d3a44b; }
+.audit-action-danger  { color: #e26a6a; }
+
+@media (max-width: 640px) {
+  .audit-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+}
+
+.user-role-badge {
+  font-size: 11px; padding: 2px 6px; border-radius: 4px; margin-left: 6px;
+  font-weight: 500;
+}
+.role-admin { background: rgba(99, 145, 226, 0.18); color: #6391e2; }
+.role-member { background: rgba(150, 150, 150, 0.18); color: var(--text-secondary); }
+.user-role-select { flex: 0 0 110px; }
+
+.user-row-wrap { display: flex; flex-direction: column; gap: 0; }
+.perm-admin-label { font-size: 12px; color: var(--text-secondary); align-self: center; }
+.perm-editor {
+  margin-top: -2px;
+  padding: 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.perm-group { display: flex; flex-direction: column; gap: 8px; }
+.perm-group-title { font-size: 13px; font-weight: 500; color: var(--text-primary); }
+.perm-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.perm-bots { padding-left: 16px; }
+.perm-check {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--text-secondary); cursor: pointer;
+}
+.perm-check input { cursor: pointer; }
+
+// --- Account section (own password change) ---
+.account-info-card {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; background: var(--bg-secondary); border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+}
+.account-row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 13px;
+}
+.account-label { color: var(--text-secondary); }
+.account-value { color: var(--text-primary); font-weight: 500; }
+.change-pw-form {
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: 360px;
+}
+.change-pw-form .input { width: 100%; }
+.change-pw-form button { align-self: flex-start; }
+.user-success { color: #4caf7a; font-size: 13px; margin: 4px 0 0; }
 </style>

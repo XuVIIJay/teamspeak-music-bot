@@ -10,8 +10,21 @@
     </div>
 
     <div class="nav-right">
-      <!-- Bot selector (always shown when at least one bot exists) -->
-      <div v-if="store.bots.length > 0" class="bot-selector" ref="selectorRef">
+      <!-- Scoped (dedicated link): static label locked to the one bot, no switching -->
+      <div v-if="store.isScoped" class="bot-selector scoped" ref="selectorRef">
+        <div class="bot-selector-btn static">
+          <span class="bot-dot" :class="{ online: activeBot?.connected }" />
+          <span class="bot-selector-name">{{ activeBot?.name ?? '专属机器人' }}</span>
+          <span v-if="activeBot?.playing && !activeBot?.paused" class="bot-state-mini playing">▶</span>
+          <span v-else-if="activeBot?.paused" class="bot-state-mini paused">⏸</span>
+          <span class="scope-badge">专属模式</span>
+        </div>
+        <button class="scope-exit-btn" @click="exitScope" title="退出专属模式">退出</button>
+      </div>
+
+      <!-- Normal: full selector with switching (shown when at least one
+           controllable bot exists — scope ∩ permission via displayedBots) -->
+      <div v-else-if="displayedBots.length > 0" class="bot-selector" ref="selectorRef">
         <button class="bot-selector-btn" @click="dropdownOpen = !dropdownOpen">
           <span class="bot-dot" :class="{ online: activeBot?.connected }" />
           <span class="bot-selector-name">{{ activeBot?.name ?? '选择机器人' }}</span>
@@ -22,7 +35,7 @@
         <div v-if="dropdownOpen" class="bot-dropdown">
           <div class="bot-dropdown-header">机器人</div>
           <div
-            v-for="bot in store.bots"
+            v-for="bot in displayedBots"
             :key="bot.id"
             class="bot-card"
             :class="{ active: bot.id === store.activeBotId }"
@@ -85,9 +98,19 @@
         </div>
       </div>
 
-      <RouterLink to="/settings" class="settings-btn">
+      <RouterLink v-if="!session.isGuest.value" to="/settings" class="settings-btn">
         <Icon icon="mdi:cog" />
       </RouterLink>
+
+      <div v-if="session.currentUser.value" class="nav-user">
+        <span class="nav-user-name">{{ session.currentUser.value.username }}</span>
+        <span class="nav-user-role" :class="`role-${session.currentUser.value.role}`">
+          {{ session.currentUser.value.role === 'admin' ? '管理员' : session.currentUser.value.role === 'guest' ? '游客' : '成员' }}
+        </span>
+        <button class="nav-user-logout" @click="onLogout" title="退出">
+          <Icon icon="mdi:logout" />
+        </button>
+      </div>
     </div>
   </nav>
 
@@ -114,11 +137,34 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, nextTick, reactive } from 'vue';
+import { useRouter } from 'vue-router';
 import { Icon } from '@iconify/vue';
 import { usePlayerStore } from '../stores/player.js';
+import { useSession } from '../composables/useSession.js';
 
 const store = usePlayerStore();
+const session = useSession();
+const { canControlBot } = session;
+const navRouter = useRouter();
+
+async function onLogout() {
+  await session.logout();
+  navRouter.replace({ name: 'login' });
+}
+// Belt-and-suspenders: the backend already scopes store.bots to the allowed
+// set for members, but filtering here keeps the UI correct if an admin (who
+// sees all bots) is constrained, or if the list ever isn't pre-filtered.
+const controllableBots = computed(() => store.bots.filter((b) => canControlBot(b.id)));
 const activeBot = computed(() => store.activeBot);
+// The bots shown in the selector are the INTERSECTION of the permission
+// allow-list (controllableBots) and the dedicated-link scope: while scoped the
+// selector is locked to the single scoped bot, otherwise the full controllable
+// list is shown and switching is allowed.
+const displayedBots = computed(() =>
+  store.isScoped
+    ? controllableBots.value.filter((b) => b.id === store.scopedBotId)
+    : controllableBots.value,
+);
 const dropdownOpen = ref(false);
 const selectorRef = ref<HTMLElement | null>(null);
 const togglingBots = ref<Record<string, boolean>>({});
@@ -135,6 +181,14 @@ const linkDialog = reactive({
 function selectBot(id: string) {
   store.setActiveBotId(id);
   dropdownOpen.value = false;
+}
+
+// Leave dedicated-link mode. Clear scope BEFORE navigating so the router guard
+// (which re-attaches ?bot from scopedBotId) sees a null scope and lets us out.
+function exitScope() {
+  store.clearScope();
+  dropdownOpen.value = false;
+  navRouter.push('/');
 }
 
 function resolveBaseUrl(): string {
@@ -348,6 +402,60 @@ onUnmounted(() => {
     min-height: 32px;
     gap: 6px;
     border-radius: var(--radius-full);
+  }
+}
+
+/* Scoped (dedicated-link) selector: locked, non-interactive label + exit */
+.bot-selector.scoped {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bot-selector-btn.static {
+  cursor: default;
+
+  &:hover {
+    background: var(--hover-bg);
+    border-color: var(--border-color);
+  }
+}
+
+.scope-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--color-primary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--color-primary-15);
+  flex-shrink: 0;
+  white-space: nowrap;
+
+  @media (max-width: 768px) {
+    display: none;
+  }
+}
+
+.scope-exit-btn {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  background: var(--hover-bg);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+
+  &:hover {
+    background: var(--bg-card);
+    border-color: var(--color-primary);
+  }
+
+  @media (max-width: 768px) {
+    padding: 6px 10px;
+    font-size: 11px;
   }
 }
 
@@ -643,4 +751,23 @@ onUnmounted(() => {
     }
   }
 }
+
+.nav-user {
+  display: flex; align-items: center; gap: 8px; margin-left: 12px;
+  color: var(--text-secondary); font-size: 13px;
+}
+.nav-user-logout {
+  height: 28px; width: 28px; display: grid; place-items: center;
+  border: 0; background: transparent; color: var(--text-secondary); cursor: pointer;
+  border-radius: var(--radius-sm);
+  &:hover { background: var(--bg-secondary); color: var(--text-primary); }
+}
+
+.nav-user-role {
+  font-size: 11px; padding: 2px 6px; border-radius: 4px;
+  font-weight: 500;
+}
+.role-admin { background: rgba(99, 145, 226, 0.18); color: #6391e2; }
+.role-member { background: rgba(150, 150, 150, 0.18); color: var(--text-secondary); }
+.role-guest { background: rgba(150, 150, 150, 0.18); color: var(--text-secondary); }
 </style>

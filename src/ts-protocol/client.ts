@@ -12,6 +12,8 @@ import {
   type Identity,
   type TextMessage,
   type ClientInfo,
+  type ClientLeftViewEvent,
+  type ClientMovedEvent,
   type FileUploadInfo,
 } from "@honeybbq/teamspeak-client";
 import type { Logger } from "../logger.js";
@@ -44,6 +46,7 @@ export interface TS3ClientOptions {
   nickname: string;
   identity?: string; // Exported identity string, or undefined to generate new
   defaultChannel?: string;
+  channelId?: string; // Numeric channel ID (takes precedence over defaultChannel)
   channelPassword?: string;
   serverPassword?: string;
   /** Force a specific protocol instead of auto-detecting. */
@@ -221,6 +224,20 @@ export class TS3Client extends EventEmitter {
         { nickname: info.nickname, id: info.id },
         "Client entered"
       );
+      this.emit("clientEnter", info);
+    });
+
+    this.client.on("clientLeave", (ev: ClientLeftViewEvent) => {
+      this.logger.debug({ id: ev.id }, "Client left");
+      this.emit("clientLeave", ev);
+    });
+
+    this.client.on("clientMoved", (ev: ClientMovedEvent) => {
+      this.logger.debug(
+        { id: ev.id, targetChannelID: ev.targetChannelID.toString() },
+        "Client moved"
+      );
+      this.emit("clientMoved", ev);
     });
 
     await this.client.connect();
@@ -238,8 +255,10 @@ export class TS3Client extends EventEmitter {
       `Logged in (visible client, ${this.detectedProtocol.toUpperCase()} server)`,
     );
 
-    // Join default channel if specified
-    if (this.options.defaultChannel) {
+    // Join channel by numeric ID (takes precedence) or by name
+    if (this.options.channelId) {
+      await this.joinChannel(this.options.channelId, this.options.channelPassword);
+    } else if (this.options.defaultChannel) {
       await this.joinChannel(
         this.options.defaultChannel,
         this.options.channelPassword
@@ -252,6 +271,17 @@ export class TS3Client extends EventEmitter {
   async joinChannel(channelName: string, password?: string): Promise<void> {
     if (!this.client) return;
 
+    const isNumeric = /^\d+$/.test(channelName);
+    if (isNumeric) {
+      try {
+        await clientMove(this.client, this.clientId, BigInt(channelName), password);
+        this.logger.info({ channelName }, "Joined channel");
+      } catch (err) {
+        this.logger.error({ err, channelName }, "Failed to join channel");
+      }
+      return;
+    }
+
     try {
       const channels = await listChannels(this.client);
       const channel = channels.find((ch) => ch.name === channelName);
@@ -261,12 +291,7 @@ export class TS3Client extends EventEmitter {
         return;
       }
 
-      await clientMove(
-        this.client,
-        this.clientId,
-        channel.id,
-        password
-      );
+      await clientMove(this.client, this.clientId, channel.id, password);
       this.logger.info(
         { channelName, cid: channel.id.toString() },
         "Joined channel"
