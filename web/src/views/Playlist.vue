@@ -16,10 +16,21 @@
           <div class="playlist-stats">
             {{ songs.length }} 首歌曲
           </div>
-          <button class="play-all-btn" @click="playAll">
-            <Icon icon="mdi:play" />
-            播放全部
-          </button>
+          <div class="playlist-actions">
+            <button class="play-all-btn" @click="playAll">
+              <Icon icon="mdi:play" />
+              播放全部
+            </button>
+            <button
+              v-if="kind === 'playlist'"
+              class="fav-btn"
+              :class="{ favorited }"
+              @click="toggleFavorite"
+            >
+              <Icon :icon="favorited ? 'mdi:heart' : 'mdi:heart-outline'" />
+              {{ favorited ? '已收藏' : '收藏' }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -69,6 +80,7 @@ const kind = (route.meta.kind as string) ?? 'playlist'; // 'playlist' | 'album'
 const playlist = ref<PlaylistDetail | null>(null);
 const songs = ref<Song[]>([]);
 const loading = ref(true);
+const favorited = ref(false);
 
 async function playAll() {
   const id = route.params.id as string;
@@ -126,8 +138,35 @@ onMounted(async () => {
     }
   }
   songs.value = songList;
+
+  // Check favorite status after songs are resolved
+  if (kind === 'playlist') {
+    favorited.value = store.isFavorited(id, platform);
+  }
+
   loading.value = false;
 });
+
+async function toggleFavorite() {
+  const id = route.params.id as string;
+  const platform = (route.query.platform as string) || 'netease';
+  if (favorited.value) {
+    const fav = store.favoritedPlaylists.find((f) => f.playlistId === id && f.platform === platform);
+    if (fav) {
+      await store.removeFavorite(fav.id);
+      favorited.value = false;
+    }
+  } else {
+    await store.addFavorite({
+      platform,
+      playlistId: id,
+      name: playlist.value?.name ?? '未知歌单',
+      coverUrl: playlist.value?.coverUrl ?? '',
+      songCount: songs.value.length,
+    });
+    favorited.value = true;
+  }
+}
 </script>
 
 <style lang="scss" scoped>
@@ -191,6 +230,43 @@ onMounted(async () => {
 
   &:hover { transform: scale(1.04); }
   &:active { transform: scale(0.96); }
+}
+
+.playlist-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.fav-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  font-size: 14px;
+  font-weight: 500;
+  transition: all var(--transition-fast);
+  cursor: pointer;
+
+  &:hover {
+    color: var(--color-primary);
+    border-color: var(--color-primary);
+    background: var(--color-primary-8);
+  }
+
+  &.favorited {
+    color: #e74c3c;
+    border-color: #e74c3c;
+    background: rgba(231, 76, 60, 0.08);
+
+    &:hover {
+      background: rgba(231, 76, 60, 0.15);
+    }
+  }
 }
 
 .song-list {

@@ -91,6 +91,11 @@ export function buildFfmpegArgs(url: string, seekSeconds: number): string[] {
   if (isHttp) {
     args.push(
       "-reconnect", "1",
+      // Long B站 streams sit on a CDN whose session/token can close the
+      // connection mid-file (premature EOF). Without this, FFmpeg treats that
+      // EOF as end-of-input and stops ~partway through (see #89); with it, it
+      // re-issues a Range request from the current offset to finish the stream.
+      "-reconnect_at_eof", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "30",
       "-reconnect_on_network_error", "1",
@@ -101,6 +106,43 @@ export function buildFfmpegArgs(url: string, seekSeconds: number): string[] {
   args.push("-i", url, "-f", "s16le", "-ar", "48000", "-ac", "2", "-acodec", "pcm_s16le", "-");
 
   return args;
+}
+
+/**
+ * Decide whether to end the current track when FFmpeg is still alive but has
+ * produced no decodable audio for `emptyAttempts` consecutive frame ticks.
+ *
+ * - Near the song end we end quickly (`maxEmptyAttempts`): a normal EOF.
+ * - Far from the end we wait much longer (`maxStallAttempts`) before giving up,
+ *   so a transient buffer underrun on a healthy stream does NOT cause a false
+ *   skip — but a genuinely dead stream (e.g. a long B站 stream whose CDN session
+ *   expired mid-playback, #89) still recovers by advancing instead of going
+ *   permanently silent.
+ */
+export function shouldEndOnStall(
+  emptyAttempts: number,
+  isNearEnd: boolean,
+  maxEmptyAttempts: number,
+  maxStallAttempts: number,
+): boolean {
+  if (isNearEnd && emptyAttempts >= maxEmptyAttempts) return true;
+  if (emptyAttempts >= maxStallAttempts) return true;
+  return false;
+}
+
+/**
+ * Maps a 0-100 volume value to a linear PCM gain factor (#84).
+ *
+ * Continuous and strictly monotonic over [0,100]: 0 at vol 0 and exactly 1.0 at
+ * vol 100. The previous mapping was a two-piece step — gain = (vol/100)*0.2 for
+ * vol<100 (so the whole 0-99 range only spanned 0..0.198, making 80->99 feel
+ * flat) then a raw passthrough at vol===100 (a ~5x jump). This single curve keeps
+ * the low end gentle but ramps smoothly toward full loudness near the top, so the
+ * slider feels proportional with no dead zone and no discontinuity at 100.
+ */
+export function volumeToFactor(volume: number): number {
+  const x = Math.max(0, Math.min(100, volume)) / 100;
+  return 0.2 * x + 0.8 * Math.pow(x, 8);
 }
 
 export interface PlayerEvents {
@@ -136,6 +178,14 @@ export class AudioPlayer extends EventEmitter {
   private static readonly HEALTHY_FRAME_RESET = 50; // ~1 second of audio
   private downloader: ChildProcess | null = null;
   private currentTempDir: string | null = null;
+  private emptyFrameAttempts = 0;
+  private static readonly MAX_EMPTY_ATTEMPTS = 250; // ~5秒的20ms帧循环（增加容错）
+  // Far-from-end stall watchdog (#89): if FFmpeg is alive but produces no audio
+  // for this many consecutive frame ticks (~60s at 20ms/frame), treat the stream
+  // as dead and advance instead of staying silent forever. Set high so a normal
+  // transient underrun never trips it.
+  private static readonly MAX_STALL_ATTEMPTS = 3000;
+  private currentSongDuration = 0; // 当前歌曲总时长（秒）
 
   constructor(logger: Logger) {
     super();
@@ -143,7 +193,7 @@ export class AudioPlayer extends EventEmitter {
     this.logger = logger;
   }
 
-  play(url: string, seekSeconds = 0): void {
+  play(url: string, seekSeconds = 0, songDuration = 0): void {
     // 1. 停止当前所有播放，自增 sessionId 屏蔽旧回调 （
     this.stop();
 
@@ -154,6 +204,8 @@ export class AudioPlayer extends EventEmitter {
     this.healthyFrames = 0;
     this.ffmpegPaused = false;
     this.spawnFailed = false;
+    this.emptyFrameAttempts = 0;
+    this.currentSongDuration = songDuration;
 
     if (this.consecutiveFailures >= AudioPlayer.MAX_CONSECUTIVE_FAILURES) {
       this.logger.error({ failures: this.consecutiveFailures }, "FFmpeg failures limit reached");
@@ -183,7 +235,7 @@ export class AudioPlayer extends EventEmitter {
       if (this.sessionId !== currentSessionId) {
         return;
       }
-
+      
       this.pcmBuffer = Buffer.concat([this.pcmBuffer, chunk]);
       if (this.pcmBuffer.length > AudioPlayer.BUFFER_HIGH_WATER && !this.ffmpegPaused && this.ffmpeg?.stdout) {
         this.ffmpeg.stdout.pause();
@@ -420,6 +472,60 @@ export class AudioPlayer extends EventEmitter {
       if (this.state === "playing") this.sendNextFrame();
       else if (this.state === "paused") this.nextFrameTime = performance.now();
 
+      // 检测pcmBuffer不足PCM_FRAME_BYTES导致连续循环卡死：
+      // 条件1: FFmpeg仍在运行但缓冲区不足一帧，且连续多次无法获取数据
+      // 条件2: 已播放时间接近歌曲结尾（最后5秒内）或未知时长
+      const elapsed = this.getElapsed();
+      const isNearEnd = this.currentSongDuration > 0 
+        ? (this.currentSongDuration - elapsed) <= 5 // 距离结尾不足5秒
+        : true; // 未知时长时保守处理
+      
+      if (this.ffmpeg !== null && this.pcmBuffer.length < PCM_FRAME_BYTES) {
+        this.emptyFrameAttempts++;
+        
+        // End the track when FFmpeg has gone silent: quickly if we're near the
+        // end (normal EOF), or after a much longer stall window if we're not
+        // (a dead/expired stream — #89 — so playback recovers instead of going
+        // permanently silent).
+        if (
+          shouldEndOnStall(
+            this.emptyFrameAttempts,
+            isNearEnd,
+            AudioPlayer.MAX_EMPTY_ATTEMPTS,
+            AudioPlayer.MAX_STALL_ATTEMPTS,
+          )
+        ) {
+          this.logger.info({
+            sessionId: this.sessionId,
+            emptyAttempts: this.emptyFrameAttempts,
+            bufferSize: this.pcmBuffer.length,
+            elapsed: Math.round(elapsed),
+            duration: this.currentSongDuration,
+            remaining: Math.round(this.currentSongDuration - elapsed),
+            nearEnd: isNearEnd,
+          }, "FFmpeg stopped outputting data, ending track");
+          this.frameLoopRunning = false;
+          if (this.state !== "idle") {
+            this.state = "idle";
+            // 清理FFmpeg进程
+            if (this.ffmpeg) {
+              const procToKill = this.ffmpeg;
+              const pidToKill = procToKill.pid;
+              this.ffmpeg = null;
+              if (pidToKill) {
+                this.forceCleanup(procToKill, pidToKill);
+              }
+            }
+            this.consecutiveFailures = 0;
+            this.emit("trackEnd");
+          }
+          return;
+        }
+      } else {
+        // 成功获取数据或FFmpeg已结束，重置计数器
+        this.emptyFrameAttempts = 0;
+      }
+
       if (!this.ffmpeg && this.pcmBuffer.length < PCM_FRAME_BYTES) {
         this.frameLoopRunning = false;
         if (this.state !== "idle") {
@@ -461,8 +567,9 @@ export class AudioPlayer extends EventEmitter {
   }
 
   private applyVolume(pcm: Buffer): Buffer {
-    if (this.volume === 100) return Buffer.from(pcm);
-    const factor = (this.volume / 100) * 0.2;
+    const factor = volumeToFactor(this.volume);
+    // factor === 1 only at volume 100; skip the per-sample loop at full loudness.
+    if (factor >= 1) return Buffer.from(pcm);
     const out = Buffer.alloc(pcm.length);
     for (let i = 0; i < pcm.length; i += 2) {
       let sample = Math.round(pcm.readInt16LE(i) * factor);
@@ -472,7 +579,11 @@ export class AudioPlayer extends EventEmitter {
   }
 
   getElapsed(): number { return this.seekOffset + (this.framesPlayed * FRAME_DURATION_MS) / 1000; }
-  seek(seconds: number): void { if (this.currentUrl && Number.isFinite(seconds) && seconds >= 0) this.play(this.currentUrl, seconds); }
+  seek(seconds: number): void { 
+    if (this.currentUrl && Number.isFinite(seconds) && seconds >= 0) {
+      this.play(this.currentUrl, seconds, this.currentSongDuration);
+    }
+  }
   pause(): void { if (this.state === "playing") this.state = "paused"; }
   resume(): void { if (this.state === "paused") { this.state = "playing"; this.nextFrameTime = performance.now(); } }
   resetFailures(): void { this.consecutiveFailures = 0; }

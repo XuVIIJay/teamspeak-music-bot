@@ -92,6 +92,13 @@
             class="card hover-scale"
           >
             <CoverArt :url="pl.coverUrl" :size="160" :radius="10" :show-shadow="true" />
+            <button
+              class="fav-badge"
+              :class="{ favorited: isFav(pl) }"
+              @click.prevent.stop="toggleFavPlaylist(pl)"
+            >
+              <Icon :icon="isFav(pl) ? 'mdi:heart' : 'mdi:heart-outline'" />
+            </button>
             <div class="card-name">
               {{ pl.name }}
               <span class="platform-badge" :class="badgeClass(pl.platform)">{{ badgeLabel(pl.platform) }}</span>
@@ -178,6 +185,25 @@ watch(selectedSource, (src) => {
     activeTab.value = 'songs';
   }
 });
+
+function isFav(pl: { id: string; platform: string }): boolean {
+  return store.isFavorited(pl.id, pl.platform);
+}
+
+async function toggleFavPlaylist(pl: { id: string; platform: string; name: string; coverUrl: string; songCount?: number }) {
+  if (isFav(pl)) {
+    const fav = store.favoritedPlaylists.find((f) => f.playlistId === pl.id && f.platform === pl.platform);
+    if (fav) await store.removeFavorite(fav.id);
+  } else {
+    await store.addFavorite({
+      platform: pl.platform,
+      playlistId: pl.id,
+      name: pl.name,
+      coverUrl: pl.coverUrl,
+      songCount: pl.songCount ?? 0,
+    });
+  }
+}
 
 async function doSearch() {
   if (!query.value.trim()) return;
@@ -356,6 +382,7 @@ onMounted(() => {
   gap: 16px 28px;
 }
 .card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -393,5 +420,40 @@ onMounted(() => {
 .badge-youtube {
   background: var(--brand-youtube-12);
   color: var(--brand-youtube);
+}
+
+.fav-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast);
+  z-index: 2;
+
+  .card:hover & {
+    opacity: 1;
+  }
+
+  &.favorited {
+    color: #e74c3c;
+    opacity: 1;
+  }
+
+  &:hover {
+    color: #e74c3c;
+    background: rgba(0, 0, 0, 0.7);
+  }
 }
 </style>
