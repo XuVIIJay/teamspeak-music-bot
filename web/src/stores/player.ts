@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia';
 import axios from 'axios';
+import { resolveScopedBot } from './scope.js';
+import { useSession } from '../composables/useSession.js';
 
 export interface Song {
   id: string;
@@ -34,6 +36,17 @@ export interface PlaylistItem {
   platform: string;
 }
 
+export interface FavoritePlaylist {
+  id: number;
+  userId: string;
+  platform: string;
+  playlistId: string;
+  name: string;
+  coverUrl: string;
+  songCount: number;
+  createdAt: string;
+}
+
 interface TimingState {
   serverElapsed: number;
   serverSyncTime: number;
@@ -50,6 +63,9 @@ export const usePlayerStore = defineStore('player', {
   state: () => ({
     bots: [] as BotStatus[],
     activeBotId: null as string | null,
+    /** When set, the UI is locked to a single bot (dedicated link, from ?bot).
+     * Source of truth is the URL — never persisted to localStorage. */
+    scopedBotId: null as string | null,
     /** Per-bot queues keyed by botId */
     queues: {} as Record<string, Song[]>,
     /** Per-bot timing state keyed by botId */
@@ -64,6 +80,9 @@ export const usePlayerStore = defineStore('player', {
     authStatus: { netease: false, qq: false },
     lastFetchTime: 0,
 
+    // Favorited playlists (fetched from server, isolated per WebUI user)
+    favoritedPlaylists: [] as FavoritePlaylist[],
+
     // Transient notification for surfacing failures (e.g., "song not playable")
     // to a global Toast. Bumped `id` triggers re-render of the same message.
     notification: null as { id: number; message: string; type: 'error' | 'info' } | null,
@@ -72,6 +91,10 @@ export const usePlayerStore = defineStore('player', {
   getters: {
     activeBot(): BotStatus | null {
       return this.bots.find((b) => b.id === this.activeBotId) ?? this.bots[0] ?? null;
+    },
+    /** True when the UI is locked to a single bot via a dedicated link. */
+    isScoped(): boolean {
+      return this.scopedBotId !== null;
     },
     currentSong(): Song | null {
       return this.activeBot?.currentSong ?? null;
@@ -125,10 +148,38 @@ export const usePlayerStore = defineStore('player', {
     },
 
     setActiveBotId(id: string) {
+      // While scoped to a dedicated link, switching bots is blocked.
+      if (this.scopedBotId !== null && id !== this.scopedBotId) return;
       this.activeBotId = id;
       // Fetch queue for newly active bot if we don't have it yet
       if (!this.queues[id]) {
         this.fetchQueue();
+      }
+    },
+
+    /** Lock the UI to a single bot (dedicated link). Sets scope first so the
+     * setActiveBotId guard does not block the switch to the scoped bot. */
+    setScope(id: string) {
+      this.scopedBotId = id;
+      this.activeBotId = id;
+      // Lazily fetch this bot's queue, mirroring setActiveBotId.
+      if (!this.queues[id]) {
+        this.fetchQueue();
+      }
+    },
+
+    clearScope() {
+      this.scopedBotId = null;
+    },
+
+    /** Reconcile the scope with the desired id from the URL (?bot). A stale or
+     * forbidden id resolves to null and clears the scope rather than locking. */
+    applyScopeFromQuery(requestedId: string | null) {
+      const r = resolveScopedBot(requestedId, this.bots.map((b) => b.id));
+      if (r) {
+        this.setScope(r);
+      } else if (requestedId) {
+        this.clearScope();
       }
     },
 
@@ -166,6 +217,11 @@ export const usePlayerStore = defineStore('player', {
       this.bots = this.bots.filter((b) => b.id !== botId);
       delete this.queues[botId];
       delete this.timings[botId];
+      // If the bot we were locked to is gone, drop the scope so the UI does not
+      // stay 'locked' onto a phantom (activeBot would silently fall back to bots[0]).
+      if (this.scopedBotId === botId) {
+        this.clearScope();
+      }
     },
 
     setQueue(botId: string, queue: Song[]) {
@@ -279,7 +335,10 @@ export const usePlayerStore = defineStore('player', {
 
     async playSong(song: Song) {
       if (!this.activeBotId) return;
-      const res = await axios.post(`/api/player/${this.activeBotId}/play-song`, { song });
+      // Guests use the non-destructive "play now" (insert-next + skip) so they
+      // can't wipe everyone else's queue; members/admins keep the normal behavior.
+      const endpoint = useSession().isGuest.value ? 'play-now-song' : 'play-song';
+      const res = await axios.post(`/api/player/${this.activeBotId}/${endpoint}`, { song });
       if (res.data?.ok === false && res.data?.message) {
         this.notify(res.data.message, 'error');
       }
@@ -397,6 +456,60 @@ export const usePlayerStore = defineStore('player', {
       if (bot) bot.playMode = mode;
     },
 
+    async startFm(platform: Source = 'netease') {
+      if (!this.activeBotId) return;
+      const res = await axios.post(`/api/player/${this.activeBotId}/fm`, { platform });
+      if (res.data?.message) {
+        this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
+      }
+      this._setTiming(this.activeBotId, { serverElapsed: 0 });
+      this._syncAfterAction();
+      this.fetchQueue();
+    },
+
+    async fetchFavorites() {
+      try {
+        const res = await axios.get('/api/favorites');
+        this.favoritedPlaylists = res.data.favorites ?? [];
+      } catch {
+        // not critical
+      }
+    },
+
+    async addFavorite(playlist: { platform: string; playlistId: string; name: string; coverUrl: string; songCount: number }) {
+      try {
+        await axios.post('/api/favorites', playlist);
+        await this.fetchFavorites();
+        this.notify('已收藏', 'info');
+      } catch (err: any) {
+        // 409 = already favorited (e.g. stale heart); just resync so the UI converges.
+        if (err?.response?.status === 409) {
+          await this.fetchFavorites();
+          return;
+        }
+        this.notify('收藏失败', 'error');
+      }
+    },
+
+    async removeFavorite(id: number) {
+      try {
+        await axios.delete(`/api/favorites/${id}`);
+        await this.fetchFavorites();
+        this.notify('已取消收藏', 'info');
+      } catch (err: any) {
+        // 404 = already gone; resync. Otherwise report failure.
+        if (err?.response?.status === 404) {
+          await this.fetchFavorites();
+          return;
+        }
+        this.notify('取消收藏失败', 'error');
+      }
+    },
+
+    isFavorited(playlistId: string, platform: string): boolean {
+      return this.favoritedPlaylists.some((f) => f.playlistId === playlistId && f.platform === platform);
+    },
+
     async fetchHomeData() {
       // Always check auth status first — if it changed since the cached
       // fetch (e.g., user logged in/out as a different account), the
@@ -413,6 +526,10 @@ export const usePlayerStore = defineStore('player', {
         newAuth.netease !== this.authStatus.netease || newAuth.qq !== this.authStatus.qq;
       this.authStatus.netease = newAuth.netease;
       this.authStatus.qq = newAuth.qq;
+
+      // Favorites are user-local and cheap; always refresh them, even on a
+      // home-data cache hit, so hearts stay correct across tabs/sessions.
+      this.fetchFavorites();
 
       // Cache hit only if auth is unchanged AND within TTL.
       if (
