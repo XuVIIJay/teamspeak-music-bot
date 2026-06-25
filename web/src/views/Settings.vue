@@ -1214,6 +1214,7 @@ async function clearAiMemory() {
   try {
     await axios.post(`/api/bot/settings/ai-memory/${botId}/clear`);
   } catch { /* ignore */ }
+}
 
 // --- User Management ---
 const session = useSession();
