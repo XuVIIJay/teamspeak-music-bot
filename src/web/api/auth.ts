@@ -3,6 +3,8 @@ import type { MusicProvider } from "../../music/provider.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { CookieStore } from "../../music/auth.js";
 import type { Logger } from "../../logger.js";
+import { requirePermission } from "../middleware/requirePermission.js";
+import { requireNotGuest } from "../middleware/requireNotGuest.js";
 
 export function createAuthRouter(
   neteaseProvider: MusicProvider,
@@ -22,7 +24,7 @@ export function createAuthRouter(
     return platform === "qq" ? qqProvider : neteaseProvider;
   }
 
-  router.get("/status", async (req, res) => {
+  router.get("/status", requireNotGuest, async (req, res) => {
     try {
       const platform = req.query.platform as string;
       const provider = getProvider(platform);
@@ -35,7 +37,7 @@ export function createAuthRouter(
     }
   });
 
-  router.post("/qrcode", async (req, res) => {
+  router.post("/qrcode", requirePermission("platform.auth"), async (req, res) => {
     try {
       const { platform } = req.body;
       const provider = getProvider(platform);
@@ -48,7 +50,7 @@ export function createAuthRouter(
     }
   });
 
-  router.get("/qrcode/status", async (req, res) => {
+  router.get("/qrcode/status", requireNotGuest, async (req, res) => {
     try {
       const { key, platform } = req.query;
       if (!key) {
@@ -77,7 +79,7 @@ export function createAuthRouter(
     }
   });
 
-  router.post("/sms/send", async (req, res) => {
+  router.post("/sms/send", requirePermission("platform.auth"), async (req, res) => {
     try {
       const { phone } = req.body;
       if (!phone) {
@@ -97,7 +99,7 @@ export function createAuthRouter(
     }
   });
 
-  router.post("/sms/verify", async (req, res) => {
+  router.post("/sms/verify", requirePermission("platform.auth"), async (req, res) => {
     try {
       const { phone, code } = req.body;
       if (!phone || !code) {
@@ -118,7 +120,7 @@ export function createAuthRouter(
     }
   });
 
-  router.post("/cookie", (req, res) => {
+  router.post("/cookie", requirePermission("platform.auth"), (req, res) => {
     const { platform, cookie } = req.body;
     if (!cookie) {
       res.status(400).json({ error: "cookie is required" });

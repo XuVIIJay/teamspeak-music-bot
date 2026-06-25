@@ -2,6 +2,27 @@
   <div class="library-page">
     <h1 class="page-title">音乐库</h1>
 
+    <!-- 我的收藏 -->
+    <section class="section" v-if="store.favoritedPlaylists.length > 0">
+      <h2 class="section-title">
+        <Icon icon="mdi:heart" style="color: var(--color-primary)" />
+        我的收藏
+        <span class="section-count">{{ store.favoritedPlaylists.length }}</span>
+      </h2>
+      <div class="playlist-grid">
+        <RouterLink
+          v-for="fav in store.favoritedPlaylists"
+          :key="fav.id"
+          :to="`/playlist/${fav.playlistId}?platform=${fav.platform}`"
+          class="playlist-card hover-scale"
+        >
+          <CoverArt :url="fav.coverUrl" :size="160" :radius="10" :show-shadow="true" />
+          <div class="playlist-name">{{ fav.name }}</div>
+          <div class="playlist-count">{{ fav.songCount }} 首</div>
+        </RouterLink>
+      </div>
+    </section>
+
     <!-- 我的歌单 -->
     <section class="section" v-if="userAvailable.length > 0">
       <h2 class="section-title">
@@ -51,6 +72,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue';
+import { RouterLink } from 'vue-router';
 import { Icon } from '@iconify/vue';
 import axios from 'axios';
 import { usePlayerStore, type Song, type Source } from '../stores/player.js';

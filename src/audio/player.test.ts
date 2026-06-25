@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildFfmpegArgs, shouldUsePowerShellDownload, cleanupTempDir } from "./player.js";
+import { buildFfmpegArgs, shouldUsePowerShellDownload, cleanupTempDir, shouldEndOnStall, volumeToFactor } from "./player.js";
 
 function getHeadersArg(args: string[]): string {
   const idx = args.indexOf("-headers");
@@ -45,6 +45,14 @@ describe("buildFfmpegArgs", () => {
     expect(Number(args[idx + 1])).toBeGreaterThanOrEqual(30);
   });
 
+  it("sets -reconnect_at_eof 1 (before -i) so long B站 streams resume after premature EOF (#89)", () => {
+    const args = buildFfmpegArgs("https://x.bilivideo.com/audio.m4s", 0);
+    const idx = args.indexOf("-reconnect_at_eof");
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe("1");
+    expect(idx).toBeLessThan(args.indexOf("-i")); // input options must precede -i
+  });
+
   it("inserts -ss before -i when seekSeconds > 0", () => {
     const args = buildFfmpegArgs("https://example.com/song.mp3", 42);
     const ssIdx = args.indexOf("-ss");
@@ -62,6 +70,7 @@ describe("buildFfmpegArgs", () => {
   it("omits HTTP-only flags when input is a local file path", () => {
     const args = buildFfmpegArgs("C:/temp/song.mp3", 0);
     expect(args).not.toContain("-reconnect");
+    expect(args).not.toContain("-reconnect_at_eof");
     expect(args).not.toContain("-reconnect_on_network_error");
     expect(args).not.toContain("-reconnect_on_http_error");
     expect(args).not.toContain("-headers");
@@ -77,6 +86,37 @@ describe("buildFfmpegArgs", () => {
     expect(args).toContain("-f");
     expect(args).toContain("s16le");
     expect(args[args.length - 1]).toBe("-");
+  });
+});
+
+describe("volumeToFactor (#84 smooth volume curve)", () => {
+  it("is 0 at vol 0 and exactly 1.0 at vol 100 (full loudness still reserved at 100)", () => {
+    expect(volumeToFactor(0)).toBe(0);
+    expect(volumeToFactor(100)).toBe(1);
+  });
+
+  it("clamps out-of-range input", () => {
+    expect(volumeToFactor(-20)).toBe(0);
+    expect(volumeToFactor(150)).toBe(1);
+  });
+
+  it("is strictly monotonic across the whole range (no dead zone)", () => {
+    for (let v = 0; v < 100; v++) {
+      expect(volumeToFactor(v + 1)).toBeGreaterThan(volumeToFactor(v));
+    }
+  });
+
+  it("removes the old flat 80-99 dead zone", () => {
+    // Old mapping moved only 0.16 -> 0.198 across 80..99; new curve climbs clearly.
+    expect(volumeToFactor(99) - volumeToFactor(80)).toBeGreaterThan(0.3);
+  });
+
+  it("removes the discontinuity at 100 (old jump was ~0.8)", () => {
+    expect(volumeToFactor(100) - volumeToFactor(99)).toBeLessThan(0.1);
+  });
+
+  it("keeps the low range gentle", () => {
+    expect(volumeToFactor(50)).toBeLessThan(0.12);
   });
 });
 
@@ -131,5 +171,32 @@ describe("cleanupTempDir", () => {
     const dir = mkdtempSync(join(tmpdir(), "tsbot-test-"));
     cleanupTempDir(dir);
     expect(() => cleanupTempDir(dir)).not.toThrow();
+  });
+});
+
+describe("shouldEndOnStall (#89 mid-track stall watchdog)", () => {
+  const MAX_EMPTY = 250; // ~5s near-end threshold
+  const MAX_STALL = 3000; // ~60s far-from-end watchdog
+
+  it("ends quickly near the end once the empty threshold is reached (normal EOF)", () => {
+    expect(shouldEndOnStall(MAX_EMPTY, true, MAX_EMPTY, MAX_STALL)).toBe(true);
+    expect(shouldEndOnStall(MAX_EMPTY - 1, true, MAX_EMPTY, MAX_STALL)).toBe(false);
+  });
+
+  it("does NOT end far from the end at the near-end threshold (avoids false skips on transient underruns)", () => {
+    // This is the core regression: a brief underrun mid-song must not end the track.
+    expect(shouldEndOnStall(MAX_EMPTY, false, MAX_EMPTY, MAX_STALL)).toBe(false);
+    expect(shouldEndOnStall(MAX_STALL - 1, false, MAX_EMPTY, MAX_STALL)).toBe(false);
+  });
+
+  it("eventually ends far from the end once the long stall watchdog trips (dead stream recovers)", () => {
+    // The pre-fix bug: far-from-end stalls grew unbounded and never ended -> permanent silence.
+    expect(shouldEndOnStall(MAX_STALL, false, MAX_EMPTY, MAX_STALL)).toBe(true);
+    expect(shouldEndOnStall(MAX_STALL + 500, false, MAX_EMPTY, MAX_STALL)).toBe(true);
+  });
+
+  it("never ends before any threshold", () => {
+    expect(shouldEndOnStall(0, true, MAX_EMPTY, MAX_STALL)).toBe(false);
+    expect(shouldEndOnStall(10, false, MAX_EMPTY, MAX_STALL)).toBe(false);
   });
 });

@@ -1,4 +1,6 @@
 import Database from "better-sqlite3";
+import { CAPABILITIES, BOTS_ALL } from "./permissions.js";
+import { GUEST_USER_ID, GUEST_USERNAME } from "./users.js";
 
 export interface PlayHistoryEntry {
   botId: string;
@@ -22,6 +24,7 @@ export interface BotInstance {
   serverPort: number;
   nickname: string;
   defaultChannel: string;
+  channelId: string;
   channelPassword: string;
   autoStart: boolean;
   /** "ts3" | "ts6" | "" (empty = auto-detect) */
@@ -51,6 +54,17 @@ export const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
   nowPlayingMsgEnabled: true,
 };
 
+export interface FavoritePlaylist {
+  id: number;
+  userId: string;
+  platform: string;
+  playlistId: string;
+  name: string;
+  coverUrl: string;
+  songCount: number;
+  createdAt: string;
+}
+
 export interface BotDatabase {
   db: Database.Database;
   addPlayHistory(entry: PlayHistoryEntry): void;
@@ -64,6 +78,10 @@ export interface BotDatabase {
   setCustomAvatarPath(botId: string, path: string | null): void;
   getAiMemory(botId: string): string;
   saveAiMemory(botId: string, memory: string): void;
+  addFavorite(userId: string, playlist: { platform: string; playlistId: string; name: string; coverUrl: string; songCount: number }): void;
+  removeFavorite(userId: string, playlistId: string, platform: string): boolean;
+  getFavorites(userId: string): FavoritePlaylist[];
+  isFavorited(userId: string, playlistId: string, platform: string): boolean;
   close(): void;
 }
 
@@ -81,6 +99,9 @@ function migrateSchema(db: Database.Database): void {
   }
   if (!names.includes("serverPassword")) {
     db.exec("ALTER TABLE bot_instances ADD COLUMN serverPassword TEXT NOT NULL DEFAULT ''");
+  }
+  if (!names.includes("channelId")) {
+    db.exec("ALTER TABLE bot_instances ADD COLUMN channelId TEXT NOT NULL DEFAULT ''");
   }
   // Profile feature flags
   const profileCols = [
@@ -101,6 +122,12 @@ function migrateSchema(db: Database.Database): void {
   }
   if (!names.includes("ai_memory")) {
     db.exec("ALTER TABLE bot_instances ADD COLUMN ai_memory TEXT NOT NULL DEFAULT ''");
+  }
+
+  const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+  const userColNames = userColumns.map((c) => c.name);
+  if (!userColNames.includes("role")) {
+    db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
   }
 }
 
@@ -125,6 +152,7 @@ function initTables(db: Database.Database): void {
       serverPort INTEGER NOT NULL,
       nickname TEXT NOT NULL,
       defaultChannel TEXT NOT NULL,
+      channelId TEXT NOT NULL DEFAULT '',
       channelPassword TEXT NOT NULL,
       autoStart INTEGER NOT NULL DEFAULT 0,
       serverProtocol TEXT NOT NULL DEFAULT '',
@@ -132,14 +160,114 @@ function initTables(db: Database.Database): void {
       serverPassword TEXT NOT NULL DEFAULT '',
       identity TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      passwordHash TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      role TEXT NOT NULL DEFAULT 'admin'
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      createdAt INTEGER NOT NULL,
+      expiresAt INTEGER NOT NULL,
+      lastSeenAt INTEGER NOT NULL,
+      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_userId ON sessions(userId);
+    CREATE INDEX IF NOT EXISTS idx_sessions_expiresAt ON sessions(expiresAt);
+
+    CREATE TABLE IF NOT EXISTS user_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp INTEGER NOT NULL,
+      actorId TEXT,
+      actorUsername TEXT,
+      targetUserId TEXT,
+      targetUsername TEXT,
+      action TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_audit_timestamp ON user_audit(timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS favorite_playlists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      playlistId TEXT NOT NULL,
+      name TEXT NOT NULL,
+      coverUrl TEXT NOT NULL DEFAULT '',
+      songCount INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE(userId, platform, playlistId)
+    );
+    CREATE INDEX IF NOT EXISTS idx_favorites_userId ON favorite_playlists(userId);
+
+    CREATE TABLE IF NOT EXISTS user_permissions (
+      userId     TEXT NOT NULL,
+      permission TEXT NOT NULL,
+      PRIMARY KEY (userId, permission),
+      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS user_bot_access (
+      userId TEXT NOT NULL,
+      botId  TEXT NOT NULL,
+      PRIMARY KEY (userId, botId),
+      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_bot_access_userId ON user_bot_access(userId);
   `);
+}
+
+/**
+ * One-time backfill: existing `member` users created before the
+ * account-permissions feature are granted full access (all 5 capabilities +
+ * the `bots.all` marker), exactly once per database. Admins are skipped (they
+ * bypass permission checks). New members created after this runs are not
+ * affected — they get the basic tier via POST /api/users. A marker row in
+ * `schema_meta` makes this idempotent.
+ */
+export function backfillMemberPermissions(db: Database.Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  const done = db.prepare("SELECT value FROM schema_meta WHERE key = 'perm_backfill_done'").get();
+  if (done) return;
+  const members = db.prepare("SELECT id FROM users WHERE role = 'member'").all() as { id: string }[];
+  const insCap = db.prepare("INSERT OR IGNORE INTO user_permissions (userId, permission) VALUES (?, ?)");
+  const tokens = [...CAPABILITIES, BOTS_ALL];
+  const tx = db.transaction(() => {
+    for (const m of members) {
+      for (const t of tokens) insCap.run(m.id, t);
+    }
+    db.prepare("INSERT INTO schema_meta (key, value) VALUES ('perm_backfill_done', ?)").run(String(members.length));
+  });
+  tx();
+}
+
+/**
+ * Ensure the reserved guest principal exists. Idempotent via the PK on
+ * `users.id`. This row only backs login-less guest sessions; it is excluded
+ * from countUsers()/listUsers() so it never interferes with first-run setup
+ * or the user-management UI, and holds an unusable password hash.
+ */
+export function ensureGuestUser(db: Database.Database): void {
+  const now = Date.now();
+  db.prepare(
+    "INSERT OR IGNORE INTO users (id, username, passwordHash, createdAt, updatedAt, role) VALUES (?, ?, '!', ?, ?, 'guest')"
+  ).run(GUEST_USER_ID, GUEST_USERNAME, now, now);
 }
 
 export function createDatabase(dbPath: string): BotDatabase {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
   initTables(db);
   migrateSchema(db);
+  backfillMemberPermissions(db);
+  ensureGuestUser(db);
 
   const insertHistory = db.prepare(`
     INSERT INTO play_history (botId, songId, songName, artist, album, platform, coverUrl)
@@ -151,14 +279,15 @@ export function createDatabase(dbPath: string): BotDatabase {
   `);
 
   const upsertInstance = db.prepare(`
-    INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelPassword, autoStart, serverProtocol, ts6ApiKey, serverPassword, identity)
-    VALUES (@id, @name, @serverAddress, @serverPort, @nickname, @defaultChannel, @channelPassword, @autoStart, @serverProtocol, @ts6ApiKey, @serverPassword, @identity)
+    INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, autoStart, serverProtocol, ts6ApiKey, serverPassword, identity)
+    VALUES (@id, @name, @serverAddress, @serverPort, @nickname, @defaultChannel, @channelId, @channelPassword, @autoStart, @serverProtocol, @ts6ApiKey, @serverPassword, @identity)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       serverAddress = excluded.serverAddress,
       serverPort = excluded.serverPort,
       nickname = excluded.nickname,
       defaultChannel = excluded.defaultChannel,
+      channelId = excluded.channelId,
       channelPassword = excluded.channelPassword,
       autoStart = excluded.autoStart,
       serverProtocol = excluded.serverProtocol,
@@ -195,6 +324,24 @@ export function createDatabase(dbPath: string): BotDatabase {
   const selectAiMemory = db.prepare(`SELECT ai_memory FROM bot_instances WHERE id = ?`);
   const updateAiMemory = db.prepare(`UPDATE bot_instances SET ai_memory = ? WHERE id = ?`);
 
+  const insertFavorite = db.prepare(`
+    INSERT INTO favorite_playlists (userId, platform, playlistId, name, coverUrl, songCount)
+    VALUES (@userId, @platform, @playlistId, @name, @coverUrl, @songCount)
+  `);
+
+  const deleteFavorite = db.prepare(`
+    DELETE FROM favorite_playlists WHERE userId = ? AND playlistId = ? AND platform = ?
+  `);
+
+  const selectFavorites = db.prepare(`
+    SELECT id, userId, platform, playlistId, name, coverUrl, songCount, createdAt
+    FROM favorite_playlists WHERE userId = ? ORDER BY createdAt DESC
+  `);
+
+  const checkFavorited = db.prepare(`
+    SELECT 1 FROM favorite_playlists WHERE userId = ? AND playlistId = ? AND platform = ?
+  `);
+
   return {
     db,
 
@@ -224,6 +371,7 @@ export function createDatabase(dbPath: string): BotDatabase {
         serverProtocol: r.serverProtocol ?? "",
         ts6ApiKey: r.ts6ApiKey ?? "",
         serverPassword: r.serverPassword ?? "",
+        channelId: r.channelId ?? "",
         identity: r.identity ?? undefined,
       }));
     },
@@ -272,6 +420,24 @@ export function createDatabase(dbPath: string): BotDatabase {
     },
     saveAiMemory(botId, memory) {
       updateAiMemory.run(memory, botId);
+    },
+
+    addFavorite(userId, playlist) {
+      insertFavorite.run({ userId, ...playlist });
+    },
+
+    removeFavorite(userId, playlistId, platform) {
+      const result = deleteFavorite.run(userId, playlistId, platform);
+      return result.changes > 0;
+    },
+
+    getFavorites(userId) {
+      return selectFavorites.all(userId) as FavoritePlaylist[];
+    },
+
+    isFavorited(userId, playlistId, platform) {
+      const row = checkFavorited.get(userId, playlistId, platform);
+      return row !== undefined;
     },
 
     close() {
