@@ -6,17 +6,23 @@ import {
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
-import type { MusicProvider } from "../music/provider.js";
+import type { MusicProvider, Song } from "../music/provider.js";
 import {
   parseCommand,
   isAdminCommand,
   type ParsedCommand,
 } from "./commands.js";
+import { parseSongRef, parseSelectionIndex } from "./song-ref.js";
 import type { Logger } from "../logger.js";
 import type { BotDatabase, ProfileConfig } from "../data/database.js";
 import type { BotConfig } from "../data/config.js";
 import { BotProfileManager } from "./profile.js";
 import type { AvatarStore } from "../data/avatars.js";
+import {
+  decideOccupancyAction,
+  occupancyFromClientList,
+  shouldResumeOnReturn,
+} from "./auto-pause.js";
 
 export interface BotInstanceOptions {
   id: string;
@@ -66,8 +72,13 @@ export class BotInstance extends EventEmitter {
   private isAdvancing = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private channelUserCount = 0;
+  private autoPaused = false;
   private profileManager: BotProfileManager;
   private isFmMode = false;
+  private fmProvider: MusicProvider | null = null;
+  /** Results of the most recent !search, for "#N" selection (issue #90). */
+  private lastSearchResults: Song[] = [];
+  private playGate: Promise<unknown> = Promise.resolve();
 
   constructor(options: BotInstanceOptions) {
     super();
@@ -143,6 +154,8 @@ export class BotInstance extends EventEmitter {
       // short-circuited on !this.connected, leaving player stuck as "playing".
       this.connected = false;
       this.player.stop();
+      // A lifecycle change must not leave a stale auto-resume armed.
+      this.autoPaused = false;
       // Only emit externally once per lifecycle so clients don't see a
       // duplicate "disconnected" after an explicit disconnect() call.
       if (this.disconnectEmitted) return;
@@ -151,8 +164,57 @@ export class BotInstance extends EventEmitter {
     });
 
     this.tsClient.on("connected", () => {
+      // Fresh connection — clear any stale auto-pause flag from a prior session.
+      this.autoPaused = false;
       this._startIdlePoller();
     });
+
+    // React near-instantly to channel membership changes. The 30s idle
+    // poller remains the fallback if any of these events are missed.
+    //
+    // clientEnter additionally arms auto-RESUME directly from the event,
+    // because the occupancy query (clientlist) times out whenever another
+    // client is present — i.e. exactly when a listener returns — so it cannot
+    // be used to confirm the return. See _resumeIfReturning().
+    this.tsClient.on("clientEnter", () => {
+      this._resumeIfReturning();
+      void this.refreshOccupancy();
+    });
+    this.tsClient.on("clientLeave", () => void this.refreshOccupancy());
+    this.tsClient.on("clientMoved", () => void this.refreshOccupancy());
+  }
+
+  /**
+   * Resume playback when a listener returns after an auto-pause, driven by the
+   * clientEnter push event rather than a (timing-out) occupancy query.
+   *
+   * We only auto-pause while alone on the server, so `autoPaused` is a reliable
+   * "paused because empty" flag; any client appearing while it's set means a
+   * listener returned. Delegating to handleOccupancy(1) routes through
+   * decideOccupancyAction (resume iff autoPaused && paused) and also cancels the
+   * idle-disconnect timer. This path NEVER pauses — userCount is always > 0 —
+   * so a spurious or unrelated enter can only (harmlessly) resume, never stop
+   * playback. Pause remains exclusively on the authoritative clientlist path.
+   */
+  private _resumeIfReturning(): void {
+    if (!this.connected) return;
+    if (shouldResumeOnReturn(this.autoPaused, this.player.getState())) {
+      this.handleOccupancy(1);
+    }
+  }
+
+  private async refreshOccupancy(): Promise<void> {
+    if (!this.connected) return;
+    try {
+      const clients = await this.tsClient.getClientsInChannel();
+      // A 0-length result means the clientlist query failed (the bot is always
+      // in its own channel) — occupancy is unknown, so don't act. Acting on it
+      // would mis-read it as "empty" and falsely auto-pause / idle-disconnect.
+      const userCount = occupancyFromClientList(clients.length);
+      if (userCount !== null) this.handleOccupancy(userCount);
+    } catch {
+      // ignore — the 30s poll is the fallback
+    }
   }
 
   async connect(): Promise<void> {
@@ -187,22 +249,51 @@ export class BotInstance extends EventEmitter {
     if (minutes === 0) this._cancelIdleTimer();
   }
 
+  /** 外部更新 autoPauseOnEmpty（由 API 保存时调用） */
+  updateAutoPause(enabled: boolean): void {
+    this.config.autoPauseOnEmpty = enabled;
+    if (!enabled && this.autoPaused && this.player.getState() === "paused") {
+      this.player.resume();
+      this.autoPaused = false;
+      this.emit("stateChange");
+    }
+  }
+
   private _startIdlePoller(): void {
     // 每 30 秒检查一次频道人数
     const poll = async () => {
       if (!this.connected) return;
       try {
         const clients = await this.tsClient.getClientsInChannel();
-        const userCount = clients.length - 1; // 排除 bot 自身
-        if (userCount <= 0) {
-          this._scheduleIdleCheck();
-        } else {
-          this._cancelIdleTimer();
-        }
+        // null = clientlist query failed (occupancy unknown) → don't act.
+        const userCount = occupancyFromClientList(clients.length);
+        if (userCount !== null) this.handleOccupancy(userCount);
       } catch { /* ignore */ }
       setTimeout(poll, 30_000);
     };
     setTimeout(poll, 30_000);
+  }
+
+  private handleOccupancy(userCount: number): void {
+    // idle-disconnect (unchanged behavior)
+    if (userCount <= 0) this._scheduleIdleCheck();
+    else this._cancelIdleTimer();
+    // auto-pause
+    const action = decideOccupancyAction(
+      this.player.getState(),
+      this.autoPaused,
+      this.config.autoPauseOnEmpty,
+      userCount,
+    );
+    if (action === "pause") {
+      this.player.pause();
+      this.autoPaused = true;
+      this.emit("stateChange");
+    } else if (action === "resume") {
+      this.player.resume();
+      this.autoPaused = false;
+      this.emit("stateChange");
+    }
   }
 
   private _scheduleIdleCheck(): void {
@@ -283,6 +374,9 @@ export class BotInstance extends EventEmitter {
       throw new Error("Bot is not connected to TeamSpeak");
     }
     switch (cmd.name) {
+      case "search":
+      case "find":
+        return this.cmdSearch(cmd);
       case "play":
         return this.cmdPlay(cmd);
       case "add":
@@ -319,7 +413,7 @@ export class BotInstance extends EventEmitter {
       case "album":
         return this.cmdAlbum(cmd);
       case "fm":
-        return this.cmdFm();
+        return this.cmdFm(cmd);
       case "artist":
         return this.cmdArtist(cmd);
       case "vote":
@@ -341,6 +435,11 @@ export class BotInstance extends EventEmitter {
     if (platform === "bilibili") return this.bilibiliProvider;
     if (platform === "youtube") return this.youtubeProvider;
     return platform === "qq" ? this.qqProvider : this.neteaseProvider;
+  }
+
+  private disableFmMode(): void {
+    this.isFmMode = false;
+    this.fmProvider = null;
   }
 
   private getProvider(flags: Set<string>): MusicProvider {
@@ -380,7 +479,10 @@ export class BotInstance extends EventEmitter {
         return false;
       }
       song.url = url;
-      this.player.play(url);
+      this.player.play(url, 0, song.duration);
+      // Fresh playback (re)start — clear auto-pause so a later occupancy
+      // change won't try to "resume" a track the user already restarted.
+      this.autoPaused = false;
       this.database.addPlayHistory({
         botId: this.id,
         songId: song.id,
@@ -390,10 +492,8 @@ export class BotInstance extends EventEmitter {
         platform: song.platform,
         coverUrl: song.coverUrl,
       });
-      // Update bot presence (fire-and-forget — never blocks playback)
-      this.profileManager.onSongChange(song).catch((err) => {
-        this.logger.warn({ err }, "Profile update failed after song change");
-      });
+      // Keep TeamSpeak-side profile updates on the same path for play/next/FM.
+      await this.syncProfileToSong(song);
       this.emit("stateChange");
       return true;
     } catch (err) {
@@ -402,17 +502,75 @@ export class BotInstance extends EventEmitter {
     }
   }
 
-  private async cmdPlay(cmd: ParsedCommand): Promise<string> {
-    if (!cmd.args) return "Usage: !play <song name or URL>";
-    const provider = this.getProvider(cmd.flags);
-    const result = await provider.search(cmd.args, 1);
-    if (result.songs.length === 0)
-      return `No results found for: ${cmd.args}`;
+  private async syncProfileToSong(song: QueuedSong | null): Promise<void> {
+    try {
+      await this.profileManager.onSongChange(song);
+    } catch (err) {
+      this.logger.warn({ err }, "Profile update failed after song change");
+    }
+  }
 
-    const song = result.songs[0];
+  /**
+   * Resolve a !play/!add/!playnext argument into a single Song, supporting three
+   * forms (issue #90):
+   *   1) "#N"          — the Nth result of the previous !search
+   *   2) id:<id> / URL — an exact song (disambiguates same-name songs)
+   *   3) plain text    — search, returning the single most-popular hit (legacy)
+   */
+  private async resolvePlayQuery(cmd: ParsedCommand): Promise<{ song?: Song; error?: string }> {
+    const args = (cmd.args ?? "").trim();
+    const p = this.config.commandPrefix;
+
+    // 1) "#N" — pick from the previous !search.
+    const sel = parseSelectionIndex(args);
+    if (sel !== null) {
+      if (this.lastSearchResults.length === 0)
+        return { error: `No recent search. Use ${p}search <name> first.` };
+      if (sel > this.lastSearchResults.length)
+        return { error: `Invalid selection #${sel}. ${p}search returned ${this.lastSearchResults.length} results.` };
+      return { song: this.lastSearchResults[sel - 1] };
+    }
+
+    // 2) id:/URL — fetch that exact song.
+    const ref = parseSongRef(args);
+    if (ref) {
+      const provider = ref.platform ? this.getProviderFor(ref.platform) : this.getProvider(cmd.flags);
+      const song = await provider.getSongDetail(ref.id);
+      if (!song) return { error: `No song found for ${ref.platform ?? provider.platform} id: ${ref.id}` };
+      return { song: { ...song, platform: provider.platform } };
+    }
+
+    // 3) Plain search term — single most-popular hit (historical behavior).
+    const provider = this.getProvider(cmd.flags);
+    const result = await provider.search(args, 1);
+    if (result.songs.length === 0) return { error: `No results found for: ${args}` };
+    return { song: { ...result.songs[0], platform: provider.platform } };
+  }
+
+  private async cmdSearch(cmd: ParsedCommand): Promise<string> {
+    const p = this.config.commandPrefix;
+    if (!cmd.args) return `Usage: ${p}search <name> [-q|-b|-y]`;
+    const provider = this.getProvider(cmd.flags);
+    const result = await provider.search(cmd.args, 8);
+    if (result.songs.length === 0) return `No results found for: ${cmd.args}`;
+    this.lastSearchResults = result.songs.map((s) => ({ ...s, platform: provider.platform }));
+    const lines = this.lastSearchResults.map(
+      (s, i) => `${i + 1}. ${s.name} - ${s.artist}${s.album ? ` 《${s.album}》` : ""} [id:${s.id}]`,
+    );
+    return [
+      `搜索结果（用 ${p}play #序号 播放，或 ${p}play id:<id>）:`,
+      ...lines,
+    ].join("\n");
+  }
+
+  private async cmdPlay(cmd: ParsedCommand): Promise<string> {
+    if (!cmd.args) return `Usage: ${this.config.commandPrefix}play <song name | #N | id:<id> | URL>`;
+    const { song, error } = await this.resolvePlayQuery(cmd);
+    if (error) return error;
+    const song0 = song!;
     this.queue.clear();
-    this.isFmMode = false;
-    this.queue.add({ ...song, platform: provider.platform });
+    this.disableFmMode();
+    this.queue.add({ ...song0 });
     this.queue.play();
 
     // Reset failure counter on user-initiated play
@@ -420,21 +578,19 @@ export class BotInstance extends EventEmitter {
     const ok = await this.resolveAndPlay(this.queue.current()!);
     if (!ok) {
       const d = await this.getAuthDiag(provider.platform as "netease" | "qq");
-      return `无法播放: ${song.name}\n${d.status}\n${d.hint}`;
+      return `无法播放: ${song0.name}\n${d.status}\n${d.hint}`;
     }
-    return `Now playing: ${song.name} - ${song.artist}${await this.getTrialWarning(song)}`;
+    return `Now playing: ${song0.name} - ${song0.artist}${await this.getTrialWarning(song0)}`;
   }
 
   private async cmdAdd(cmd: ParsedCommand): Promise<string> {
-    if (!cmd.args) return "Usage: !add <song name>";
-    const provider = this.getProvider(cmd.flags);
-    const result = await provider.search(cmd.args, 1);
-    if (result.songs.length === 0)
-      return `No results found for: ${cmd.args}`;
+    if (!cmd.args) return `Usage: ${this.config.commandPrefix}add <song name | #N | id:<id> | URL>`;
+    const { song, error } = await this.resolvePlayQuery(cmd);
+    if (error) return error;
+    const s = song!;
 
-    const song = result.songs[0];
     const wasIdle = this.player.getState() === "idle";
-    this.queue.add({ ...song, platform: provider.platform });
+    this.queue.add({ ...s });
 
     // If nothing was playing, start this newly-added song immediately.
     // Matches /api/player/:id/add-by-id behavior so both add paths feel
@@ -446,23 +602,21 @@ export class BotInstance extends EventEmitter {
       this.emit("stateChange");
       if (!ok) {
         const d = await this.getAuthDiag(provider.platform as "netease" | "qq");
-        return `无法播放: ${song.name}\n${d.status}\n${d.hint}`;
+        return `无法播放: ${s.name}\n${d.status}\n${d.hint}`;
       }
-      return `Now playing: ${song.name} - ${song.artist}${await this.getTrialWarning(song)}`;
+      return `Now playing: ${s.name} - ${s.artist}${await this.getTrialWarning(s)}`;
     }
 
     this.emit("stateChange");
-    return `Added to queue: ${song.name} - ${song.artist} (position ${this.queue.size()})`;
+    return `Added to queue: ${s.name} - ${s.artist} (position ${this.queue.size()})`;
   }
 
   private async cmdPlayNext(cmd: ParsedCommand): Promise<string> {
-    if (!cmd.args) return "Usage: !playnext <song name>";
-    const provider = this.getProvider(cmd.flags);
-    const result = await provider.search(cmd.args, 1);
-    if (result.songs.length === 0)
-      return `No results found for: ${cmd.args}`;
+    if (!cmd.args) return `Usage: ${this.config.commandPrefix}playnext <song name | #N | id:<id> | URL>`;
+    const { song, error } = await this.resolvePlayQuery(cmd);
+    if (error) return error;
+    const s = song!;
 
-    const song = result.songs[0];
     const wasIdle = this.player.getState() === "idle";
     // Capture the slot addNext WILL insert at, before mutating the queue.
     // addNext pushes when currentIndex<0 (slot = size); otherwise splices
@@ -473,7 +627,7 @@ export class BotInstance extends EventEmitter {
       this.queue.getCurrentIndex() < 0
         ? this.queue.size()
         : this.queue.getCurrentIndex() + 1;
-    this.queue.addNext({ ...song, platform: provider.platform });
+    this.queue.addNext({ ...s });
 
     if (wasIdle) {
       this.queue.playAt(insertedAt);
@@ -482,31 +636,36 @@ export class BotInstance extends EventEmitter {
       this.emit("stateChange");
       if (!ok) {
         const d = await this.getAuthDiag(provider.platform as "netease" | "qq");
-        return `无法播放: ${song.name}\n${d.status}\n${d.hint}`;
+        return `无法播放: ${s.name}\n${d.status}\n${d.hint}`;
       }
-      return `Now playing: ${song.name} - ${song.artist}`;
+      return `Now playing: ${s.name} - ${s.artist}`;
     }
 
     this.emit("stateChange");
-    return `Up next: ${song.name} - ${song.artist}`;
+    return `Up next: ${s.name} - ${s.artist}`;
   }
 
   private cmdPause(): string {
     this.player.pause();
+    // User-initiated pause — clear auto-pause so occupancy won't auto-resume it.
+    this.autoPaused = false;
     this.emit("stateChange");
     return "Paused";
   }
 
   private cmdResume(): string {
     this.player.resume();
+    // User-initiated resume — drop any auto-pause flag.
+    this.autoPaused = false;
     this.emit("stateChange");
     return "Resumed";
   }
 
   private cmdStop(): string {
     this.player.stop();
+    this.autoPaused = false;
     this.queue.clear();
-    this.isFmMode = false;
+    this.disableFmMode();
     this.profileManager.onSongChange(null).catch((err) => {
       this.logger.warn({ err }, "Profile restore failed on stop");
     });
@@ -564,7 +723,7 @@ export class BotInstance extends EventEmitter {
   private cmdClear(): string {
     this.player.stop();
     this.queue.clear();
-    this.isFmMode = false;
+    this.disableFmMode();
     this.profileManager.onSongChange(null).catch((err) => {
       this.logger.warn({ err }, "Profile restore failed on clear");
     });
@@ -637,7 +796,7 @@ export class BotInstance extends EventEmitter {
     if (songs.length === 0) return "Playlist is empty or not found";
 
     this.queue.clear();
-    this.isFmMode = false;
+    this.disableFmMode();
     for (const song of songs) {
       this.queue.add({ ...song, platform: provider.platform });
     }
@@ -677,7 +836,7 @@ export class BotInstance extends EventEmitter {
     if (songs.length === 0) return "Album is empty or not found";
 
     this.queue.clear();
-    this.isFmMode = false;
+    this.disableFmMode();
     for (const song of songs) {
       this.queue.add({ ...song, platform: provider.platform });
     }
@@ -692,20 +851,31 @@ export class BotInstance extends EventEmitter {
     return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
-  private async cmdFm(): Promise<string> {
-    if (!this.neteaseProvider.getPersonalFm) {
-      return "Personal FM is only available for NetEase Cloud Music";
+  private async cmdFm(cmd: ParsedCommand): Promise<string> {
+    return this.startFm(this.getProvider(cmd.flags));
+  }
+
+  async startFm(provider: MusicProvider = this.neteaseProvider): Promise<string> {
+    // Match the !fm chat-command guard: refuse before mutating the queue when
+    // offline, so the web /fm route can't wipe the queue + flip into FM mode
+    // while nothing can actually play.
+    if (!this.connected) {
+      return "Bot is not connected to TeamSpeak";
     }
-    const songs = await this.neteaseProvider.getPersonalFm();
+    if (!provider.getPersonalFm) {
+      return `Personal FM is not available for ${provider.platform}`;
+    }
+    const songs = await provider.getPersonalFm();
     if (songs.length === 0)
       return "No FM songs available (need to login first)";
 
     this.queue.clear();
     for (const song of songs) {
-      this.queue.add({ ...song, platform: "netease" });
+      this.queue.add({ ...song, platform: provider.platform });
     }
     this.queue.setMode(PlayMode.Random);
     this.isFmMode = true;
+    this.fmProvider = provider;
     this.player.resetFailures();
 
     const first = this.queue.play();
@@ -716,7 +886,8 @@ export class BotInstance extends EventEmitter {
       const d = await this.getAuthDiag("netease");
       return `无法播放FM\n${d.status}\n${d.hint}`;
     }
-    return `Personal FM started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}${ok && first ? await this.getTrialWarning(first) : ""}`;
+    const label = provider.platform === "qq" ? "QQ Radar FM" : "Personal FM";
+    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdArtist(cmd: ParsedCommand): Promise<string> {
@@ -737,7 +908,7 @@ export class BotInstance extends EventEmitter {
     }
 
     this.queue.clear();
-    this.isFmMode = false;
+    this.disableFmMode();
     for (const song of filtered) {
       this.queue.add({ ...song, platform: provider.platform });
     }
@@ -756,14 +927,15 @@ export class BotInstance extends EventEmitter {
   }
 
   private async refillFm(): Promise<void> {
-    if (!this.isFmMode || !this.neteaseProvider.getPersonalFm) return;
+    const provider = this.fmProvider;
+    if (!this.isFmMode || !provider?.getPersonalFm) return;
     try {
-      const songs = await this.neteaseProvider.getPersonalFm();
+      const songs = await provider.getPersonalFm();
       if (songs.length === 0) return;
       for (const song of songs) {
-        this.queue.add({ ...song, platform: "netease" });
+        this.queue.add({ ...song, platform: provider.platform });
       }
-      this.logger.debug({ count: songs.length }, "FM queue refilled");
+      this.logger.debug({ count: songs.length, platform: provider.platform }, "FM queue refilled");
     } catch (err) {
       this.logger.error({ err }, "Failed to refill FM queue");
     }
@@ -892,11 +1064,14 @@ export class BotInstance extends EventEmitter {
     const p = this.config.commandPrefix;
     return [
       "TSMusicBot Commands:",
-      `${p}play <song>  — Search and play`,
+      `${p}play <song>  — Search and play (most popular match)`,
       `${p}play -q <song> — Search from QQ Music`,
       `${p}play -b <song> — Search from BiliBili`,
       `${p}play -y <song> — Search from YouTube (yt-dlp)`,
-      `${p}add <song>   — Add to queue`,
+      `${p}search <name> — List top matches to pick a specific (same-name) song`,
+      `${p}play #N       — Play the Nth result of the last ${p}search`,
+      `${p}play id:<id>  — Play an exact song by id / URL (NetEase·QQ·BiliBili)`,
+      `${p}add <song>   — Add to queue (also accepts #N / id: / URL)`,
       `${p}playnext <song> — Insert as next song (alias: ${p}pn)`,
       `${p}pause/resume — Pause/resume`,
       `${p}next/prev    — Next/previous`,
@@ -982,6 +1157,14 @@ export class BotInstance extends EventEmitter {
     const pathMatch = input.match(/\/(\d+)/);
     if (pathMatch) return pathMatch[1];
     return input;
+  }
+
+  /** Serialize queue-mutation + play sequences so concurrent requests can't
+   *  interleave (audible track must match queue.currentIndex). */
+  runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.playGate.then(fn, fn);
+    this.playGate = next.catch(() => {});
+    return next;
   }
 
   getStatus(): BotStatus {

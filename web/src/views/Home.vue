@@ -21,13 +21,23 @@
     <!-- 私人FM -->
     <section class="section">
       <h2 class="section-title">私人FM</h2>
-      <div class="fm-card hover-scale" @click="playFm">
+      <div class="fm-card hover-scale" @click="playFm('netease')">
         <div class="fm-icon-wrapper">
           <Icon icon="mdi:radio" class="fm-icon" />
         </div>
         <div class="fm-info">
           <div class="fm-title">开启私人FM</div>
           <div class="fm-desc">根据你的口味推荐音乐</div>
+        </div>
+        <Icon icon="mdi:play-circle" class="fm-play-icon" />
+      </div>
+      <div v-if="store.authStatus.qq" class="fm-card hover-scale" @click="playFm('qq')">
+        <div class="fm-icon-wrapper qq">
+          <Icon icon="mdi:radar" class="fm-icon" />
+        </div>
+        <div class="fm-info">
+          <div class="fm-title">QQ音乐雷达</div>
+          <div class="fm-desc">猜你喜欢 / 雷达推荐歌曲流</div>
         </div>
         <Icon icon="mdi:play-circle" class="fm-play-icon" />
       </div>
@@ -68,6 +78,27 @@
         >
           <CoverArt :url="playlist.coverUrl" :size="160" :radius="10" :show-shadow="true" />
           <div class="playlist-name">{{ playlist.name }}</div>
+        </RouterLink>
+      </div>
+    </section>
+
+    <!-- 我的收藏 -->
+    <section class="section" v-if="store.favoritedPlaylists.length > 0">
+      <h2 class="section-title">
+        <Icon icon="mdi:heart" style="color: var(--color-primary)" />
+        我的收藏
+        <span class="section-count">{{ store.favoritedPlaylists.length }}</span>
+      </h2>
+      <div class="playlist-grid">
+        <RouterLink
+          v-for="fav in store.favoritedPlaylists"
+          :key="fav.id"
+          :to="`/playlist/${fav.playlistId}?platform=${fav.platform}`"
+          class="playlist-card hover-scale"
+        >
+          <CoverArt :url="fav.coverUrl" :size="160" :radius="10" :show-shadow="true" />
+          <div class="playlist-name">{{ fav.name }}</div>
+          <div class="playlist-count">{{ fav.songCount }} 首</div>
         </RouterLink>
       </div>
     </section>
@@ -125,9 +156,9 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue';
+import { RouterLink } from 'vue-router';
 import { Icon } from '@iconify/vue';
-import axios from 'axios';
-import { usePlayerStore, type Song, type Source } from '../stores/player.js';
+import { usePlayerStore, type Source } from '../stores/player.js';
 import { loadTabSource, saveTabSource } from '../stores/sourceTabs.js';
 import CoverArt from '../components/CoverArt.vue';
 import SourceTabs from '../components/SourceTabs.vue';
@@ -180,19 +211,8 @@ const visibleUserPlaylists = computed(() =>
     : currentUserPlaylists.value.slice(0, USER_PLAYLIST_LIMIT)
 );
 
-async function playFm() {
-  try {
-    const res = await axios.get('/api/music/personal/fm');
-    const songs: Song[] = res.data.songs;
-    if (songs.length > 0) {
-      await store.play(songs[0].name, songs[0].platform);
-      for (let i = 1; i < songs.length; i++) {
-        await store.addToQueue(songs[i].name, songs[i].platform);
-      }
-    }
-  } catch {
-    // Ignore
-  }
+async function playFm(platform: Source) {
+  await store.startFm(platform);
 }
 
 onMounted(() => {
@@ -318,6 +338,7 @@ onMounted(() => {
   border-radius: var(--radius-lg);
   cursor: pointer;
   transition: background var(--transition-fast);
+  margin-bottom: 12px;
 
   &:hover {
     background: var(--hover-bg);
@@ -333,6 +354,10 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+
+  &.qq {
+    background: linear-gradient(135deg, var(--brand-qq), #17a2b8);
+  }
 }
 
 .fm-icon {
@@ -379,6 +404,7 @@ onMounted(() => {
 
 .daily-card {
   cursor: pointer;
+  min-width: 0;
 }
 
 .daily-name {

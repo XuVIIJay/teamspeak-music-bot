@@ -3,9 +3,10 @@
     <Queue :open="showQueue" @close="showQueue = false" />
 
     <div class="player-bar frosted-glass">
-      <!-- Progress bar -->
+      <!-- Progress bar (read-only display; seek interaction gated on transport / canTransport) -->
       <div
         class="progress-bar-container"
+        :class="{ 'no-seek': !canTransport }"
         ref="progressBarRef"
         @click="onProgressClick"
         @mousemove="onProgressHover"
@@ -27,42 +28,48 @@
       <div class="player-left" @click="toggleLyrics">
         <CoverArt :url="currentSong.coverUrl" :size="40" />
         <div class="song-info">
-          <div class="song-name">{{ currentSong.name }}</div>
+          <div class="song-name" :title="currentSong.name">{{ currentSong.name }}</div>
           <div class="song-artist">
             <span v-if="showBotBadge" class="bot-badge">{{ activeBot?.name }}</span>
-            {{ currentSong.artist }}
+            <span class="artist-name" :title="currentSong.artist">{{ currentSong.artist }}</span>
           </div>
         </div>
       </div>
 
       <div class="player-center">
         <span class="time-display time-current">{{ formatTime(currentElapsed) }}</span>
-        <button class="control-btn" @click="store.prev()">
-          <Icon icon="mdi:skip-previous" />
-        </button>
-        <button class="play-btn" @click="togglePlay">
-          <Icon :icon="store.isPlaying ? 'mdi:pause' : 'mdi:play'" />
-        </button>
-        <button class="control-btn" @click="store.next()">
-          <Icon icon="mdi:skip-next" />
-        </button>
-        <button class="control-btn mode-btn" @click="cycleMode" :title="modeLabel">
-          <Icon :icon="modeIcon" />
-          <span class="mode-label">{{ modeLabel }}</span>
-        </button>
+        <!-- Transport controls: per-button gating honoring guest flags -->
+        <template v-if="canControl || canTransport || canSkip || canModeCtl">
+          <button v-if="canControl" class="control-btn" @click="store.prev()">
+            <Icon icon="mdi:skip-previous" />
+          </button>
+          <button v-if="canTransport" class="play-btn" @click="togglePlay">
+            <Icon :icon="store.isPlaying ? 'mdi:pause' : 'mdi:play'" />
+          </button>
+          <button v-if="canSkip" class="control-btn" @click="store.next()">
+            <Icon icon="mdi:skip-next" />
+          </button>
+          <button v-if="canModeCtl" class="control-btn mode-btn" @click="cycleMode" :title="modeLabel">
+            <Icon :icon="modeIcon" />
+            <span class="mode-label">{{ modeLabel }}</span>
+          </button>
+        </template>
         <span class="time-display time-total">{{ formatTime(currentSong?.duration ?? 0) }}</span>
       </div>
 
       <div class="player-right">
-        <Icon icon="mdi:volume-high" class="volume-icon" />
-        <input
-          type="range"
-          min="0"
-          max="100"
-          :value="activeBot?.volume ?? 75"
-          @change="onVolumeChange"
-          class="volume-slider"
-        />
+        <!-- Volume gated on transport -->
+        <template v-if="canTransport">
+          <Icon icon="mdi:volume-high" class="volume-icon" />
+          <input
+            type="range"
+            min="0"
+            max="100"
+            :value="activeBot?.volume ?? 75"
+            @change="onVolumeChange"
+            class="volume-slider"
+          />
+        </template>
         <button class="control-btn" :class="{ active: showQueue }" @click="showQueue = !showQueue">
           <Icon icon="mdi:playlist-music" />
         </button>
@@ -79,12 +86,19 @@ import { computed, ref, onMounted, onUnmounted } from 'vue';
 import { Icon } from '@iconify/vue';
 import { useRoute, useRouter } from 'vue-router';
 import { usePlayerStore } from '../stores/player.js';
+import { useSession } from '../composables/useSession.js';
 import CoverArt from './CoverArt.vue';
 import Queue from './Queue.vue';
 
 const route = useRoute();
 const router = useRouter();
 const showQueue = ref(false);
+
+const { can, guestCan } = useSession();
+const canControl = computed(() => can('player.control'));
+const canTransport = computed(() => can('player.control') || guestCan('transport'));
+const canSkip = computed(() => can('player.control') || guestCan('skip'));
+const canModeCtl = computed(() => can('player.control') || guestCan('playMode'));
 
 const store = usePlayerStore();
 const activeBot = computed(() => store.activeBot);
@@ -133,6 +147,7 @@ function updateProgress() {
 }
 
 async function onProgressClick(e: MouseEvent) {
+  if (!canTransport.value) return; // seek gated on transport (canTransport)
   const bar = progressBarRef.value;
   if (!bar) return;
   const rect = bar.getBoundingClientRect();
@@ -237,6 +252,14 @@ function cycleMode() {
     .progress-bar-bg { height: 4px; }
     .progress-bar-thumb { opacity: 1; transform: scale(1); }
   }
+
+  &.no-seek {
+    cursor: default;
+    &:hover {
+      .progress-bar-bg { height: 2px; }
+      .progress-bar-thumb { opacity: 0; transform: scale(0); }
+    }
+  }
 }
 
 .progress-bar-bg {
@@ -310,6 +333,8 @@ function cycleMode() {
 
 .song-info {
   min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .song-name {
@@ -326,6 +351,16 @@ function cycleMode() {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.artist-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
 }
 
 .bot-badge {

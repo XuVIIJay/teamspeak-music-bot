@@ -7,11 +7,12 @@ import {
 import type { MusicProvider } from "../music/provider.js";
 import { YouTubeProvider } from "../music/youtube.js";
 import type { BotDatabase } from "../data/database.js";
-import type { BotConfig } from "../data/config.js";
+import { saveConfig, type BotConfig } from "../data/config.js";
 import type { Logger } from "../logger.js";
 
 import type { ServerProtocol } from "../ts-protocol/client.js";
 import type { AvatarStore } from "../data/avatars.js";
+import type { PermissionStore } from "../data/permissions.js";
 
 /**
  * Run bot.connect() with a hard deadline. If the handshake hangs (e.g. the
@@ -56,6 +57,7 @@ export interface CreateBotParams {
   queryPort?: number;
   nickname: string;
   defaultChannel?: string;
+  channelId?: string;
   channelPassword?: string;
   autoStart?: boolean;
   /** Force TS3 or TS6 protocol; omit or "unknown" for auto-detect. */
@@ -76,6 +78,8 @@ export class BotManager extends EventEmitter {
   private config: BotConfig;
   private logger: Logger;
   private avatarStore: AvatarStore;
+  private permissions: PermissionStore;
+  private configPath: string;
 
   constructor(
     neteaseProvider: MusicProvider,
@@ -84,7 +88,9 @@ export class BotManager extends EventEmitter {
     database: BotDatabase,
     config: BotConfig,
     logger: Logger,
-    avatarStore: AvatarStore
+    avatarStore: AvatarStore,
+    permissions: PermissionStore,
+    configPath: string
   ) {
     super();
     this.neteaseProvider = neteaseProvider;
@@ -95,6 +101,8 @@ export class BotManager extends EventEmitter {
     this.config = config;
     this.logger = logger;
     this.avatarStore = avatarStore;
+    this.permissions = permissions;
+    this.configPath = configPath;
   }
 
   async createBot(params: CreateBotParams): Promise<BotInstance> {
@@ -109,6 +117,7 @@ export class BotManager extends EventEmitter {
         queryPort: params.queryPort ?? 10011,
         nickname: params.nickname,
         defaultChannel: params.defaultChannel,
+        channelId: params.channelId,
         channelPassword: params.channelPassword,
         serverPassword: params.serverPassword,
         serverProtocol: params.serverProtocol,
@@ -134,6 +143,7 @@ export class BotManager extends EventEmitter {
       serverPort: params.serverPort,
       nickname: params.nickname,
       defaultChannel: params.defaultChannel ?? "",
+      channelId: params.channelId ?? "",
       channelPassword: params.channelPassword ?? "",
       autoStart: params.autoStart ?? false,
       serverProtocol: params.serverProtocol ?? "",
@@ -152,6 +162,12 @@ export class BotManager extends EventEmitter {
       this.bots.delete(id);
     }
     this.database.deleteBotInstance(id);
+    this.permissions.pruneBot(id);
+    // Prune the deleted bot from the guest scope allow-list (mirrors permissions.pruneBot).
+    if (Array.isArray(this.config.guestMode.bots) && this.config.guestMode.bots.includes(id)) {
+      this.config.guestMode.bots = this.config.guestMode.bots.filter((b) => b !== id);
+      saveConfig(this.configPath, this.config);
+    }
     this.emit("botInstanceRemoved", id);
     this.logger.info({ botId: id }, "Bot instance removed");
   }
@@ -168,6 +184,7 @@ export class BotManager extends EventEmitter {
       serverPort: params.serverPort ?? existing.serverPort,
       nickname: params.nickname ?? existing.nickname,
       defaultChannel: params.defaultChannel ?? existing.defaultChannel,
+      channelId: params.channelId ?? existing.channelId,
       channelPassword: params.channelPassword ?? existing.channelPassword,
       serverProtocol: params.serverProtocol ?? existing.serverProtocol,
       ts6ApiKey: params.ts6ApiKey ?? existing.ts6ApiKey,
@@ -226,6 +243,7 @@ export class BotManager extends EventEmitter {
           // each connect and strips all previously granted groups.
           identity: saved.identity || undefined,
           defaultChannel: saved.defaultChannel || undefined,
+          channelId: saved.channelId || undefined,
           channelPassword: saved.channelPassword || undefined,
           serverPassword: saved.serverPassword || undefined,
           serverProtocol: proto === "ts3" || proto === "ts6" ? proto : undefined,
@@ -277,6 +295,7 @@ export class BotManager extends EventEmitter {
           nickname: saved.nickname,
           identity: saved.identity || undefined,
           defaultChannel: saved.defaultChannel || undefined,
+          channelId: saved.channelId || undefined,
           channelPassword: saved.channelPassword || undefined,
           serverPassword: saved.serverPassword || undefined,
           serverProtocol: proto === "ts3" || proto === "ts6" ? proto : undefined,
