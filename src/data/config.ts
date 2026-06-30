@@ -32,6 +32,8 @@ export interface BotConfig {
   // (nginx/Caddy/Cloudflare). Required for correct protocol/host detection
   // behind HTTPS-terminating proxies.
   trustProxy: boolean;
+  // DeepSeek API key for AI chat feature. Leave empty to disable !ai.
+  deepseekApiKey: string;
   guestMode: GuestModeConfig;
 }
 
@@ -55,6 +57,7 @@ export function getDefaultConfig(): BotConfig {
     localAudioEnabled: true,
     publicUrl: "",
     trustProxy: false,
+    deepseekApiKey: "",
     guestMode: {
       enabled: false,
       bots: "all",

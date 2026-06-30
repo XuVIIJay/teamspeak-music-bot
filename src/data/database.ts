@@ -78,6 +78,8 @@ export interface BotDatabase {
   saveProfileConfig(botId: string, config: ProfileConfig): void;
   getCustomAvatarPath(botId: string): string | null;
   setCustomAvatarPath(botId: string, path: string | null): void;
+  getAiMemory(botId: string): string;
+  saveAiMemory(botId: string, memory: string): void;
   addFavorite(userId: string, playlist: { platform: string; playlistId: string; name: string; coverUrl: string; songCount: number }): void;
   removeFavorite(userId: string, playlistId: string, platform: string): boolean;
   getFavorites(userId: string): FavoritePlaylist[];
@@ -120,6 +122,9 @@ function migrateSchema(db: Database.Database): void {
   }
   if (!names.includes("custom_avatar_path")) {
     db.exec("ALTER TABLE bot_instances ADD COLUMN custom_avatar_path TEXT");
+  }
+  if (!names.includes("ai_memory")) {
+    db.exec("ALTER TABLE bot_instances ADD COLUMN ai_memory TEXT NOT NULL DEFAULT ''");
   }
 
   const userColumns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
@@ -321,6 +326,9 @@ export function createDatabase(dbPath: string): BotDatabase {
   const selectCustomAvatar = db.prepare(`SELECT custom_avatar_path FROM bot_instances WHERE id = ?`);
   const updateCustomAvatar = db.prepare(`UPDATE bot_instances SET custom_avatar_path = ? WHERE id = ?`);
 
+  const selectAiMemory = db.prepare(`SELECT ai_memory FROM bot_instances WHERE id = ?`);
+  const updateAiMemory = db.prepare(`UPDATE bot_instances SET ai_memory = ? WHERE id = ?`);
+
   const insertFavorite = db.prepare(`
     INSERT INTO favorite_playlists (userId, platform, playlistId, name, coverUrl, songCount)
     VALUES (@userId, @platform, @playlistId, @name, @coverUrl, @songCount)
@@ -411,6 +419,14 @@ export function createDatabase(dbPath: string): BotDatabase {
     },
     setCustomAvatarPath(botId, path) {
       updateCustomAvatar.run(path, botId);
+    },
+
+    getAiMemory(botId) {
+      const row = selectAiMemory.get(botId) as { ai_memory: string } | undefined;
+      return row?.ai_memory ?? "";
+    },
+    saveAiMemory(botId, memory) {
+      updateAiMemory.run(memory, botId);
     },
 
     addFavorite(userId, playlist) {
