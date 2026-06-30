@@ -453,6 +453,19 @@
           @change="saveAutoPause"
         />
       </label>
+
+      <label class="profile-toggle behavior-toggle">
+        <div class="profile-toggle-text">
+          <div class="profile-toggle-label">本地音频播放</div>
+          <div class="profile-toggle-hint">开启后允许在搜索页拖拽/选择本地音频上传并播放；关闭后会拒绝新的本地上传和本地歌曲播放请求。</div>
+        </div>
+        <input
+          v-model="localAudioEnabled"
+          type="checkbox"
+          class="profile-toggle-switch"
+          @change="saveLocalAudioEnabled"
+        />
+      </label>
     </section>
 
     <!-- Guest Mode (admin only) -->
@@ -501,6 +514,23 @@
         <button class="btn-primary" :disabled="guestSaving" @click="saveGuestMode">
           {{ guestSaving ? '保存中…' : '保存' }}
         </button>
+      </div>
+    </section>
+
+    <!-- Command Permissions (admin only) -->
+    <section v-if="session.isAdmin.value" class="settings-section">
+      <h2 class="section-title">命令权限</h2>
+      <p class="profile-section-hint">
+        限制谁能在 TeamSpeak 聊天里运行管理类命令（stop / clear / remove / move / vol / mode）。
+        填写允许的服务器组 ID（逗号分隔）。留空 = 不限制，所有人可用。如何查看服务器组 ID 见 README。
+      </p>
+      <div class="setting-row">
+        <div class="prefix-input-wrap">
+          <input v-model="adminGroupsText" class="input input-sm" placeholder="如 6, 8" />
+          <button class="btn-primary" :disabled="adminGroupsSaving" @click="saveAdminGroups">
+            {{ adminGroupsSaving ? '保存中…' : '保存' }}
+          </button>
+        </div>
       </div>
     </section>
 
@@ -1020,13 +1050,16 @@ async function savePrefix() {
 const idleTimeout = ref(0);
 // Defaults OFF to match the backend default (config.ts getDefaultConfig).
 const autoPauseOnEmpty = ref(false);
+const localAudioEnabled = ref(true);
 
 async function loadIdleTimeout() {
   try {
     const res = await axios.get('/api/bot/settings');
     idleTimeout.value = res.data.idleTimeoutMinutes ?? 0;
     autoPauseOnEmpty.value = res.data.autoPauseOnEmpty ?? false;
+    localAudioEnabled.value = res.data.localAudioEnabled ?? true;
     applyGuestModeFromServer(res.data.guestMode);
+    applyAdminGroupsFromServer(res.data.adminGroups);
   } catch { /* ignore */ }
 }
 
@@ -1042,6 +1075,13 @@ async function saveAutoPause() {
   } catch { /* ignore */ }
 }
 
+async function saveLocalAudioEnabled() {
+  try {
+    const res = await axios.post('/api/bot/settings', { localAudioEnabled: localAudioEnabled.value });
+    localAudioEnabled.value = res.data.localAudioEnabled ?? localAudioEnabled.value;
+  } catch { /* ignore */ }
+}
+
 // --- Guest mode (admin only) ---
 const GUEST_FLAGS: { token: string; label: string }[] = [
   { token: 'addToQueue', label: '添加到队列末尾' },
@@ -1051,12 +1091,13 @@ const GUEST_FLAGS: { token: string; label: string }[] = [
   { token: 'transport', label: '暂停/继续/进度/音量' },
   { token: 'removeClear', label: '移除/清空队列' },
   { token: 'playMode', label: '切换播放模式 / FM' },
+  { token: 'playCollection', label: '播放整个歌单/专辑' },
 ];
 const guestMode = reactive<{ enabled: boolean; botsAll: boolean; selectedBotIds: string[]; permissions: Record<string, boolean> }>({
   enabled: false,
   botsAll: true,
   selectedBotIds: [],
-  permissions: { addToQueue: true, playNext: false, playNow: false, skip: false, transport: false, removeClear: false, playMode: false },
+  permissions: { addToQueue: true, playNext: false, playNow: false, skip: false, transport: false, removeClear: false, playMode: false, playCollection: false },
 });
 const guestSaving = ref(false);
 
@@ -1089,6 +1130,35 @@ async function saveGuestMode() {
     applyGuestModeFromServer(res.data?.guestMode);
   } catch { /* ignore */ } finally {
     guestSaving.value = false;
+  }
+}
+
+// --- Command permissions (admin only) ---
+const adminGroupsText = ref('');
+const adminGroupsSaving = ref(false);
+
+function applyAdminGroupsFromServer(groups: unknown) {
+  if (Array.isArray(groups)) {
+    adminGroupsText.value = groups.filter((g) => typeof g === 'number').join(', ');
+  }
+}
+
+function parseAdminGroups(text: string): number[] {
+  return text
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map((s) => Number(s))
+    .filter((n) => Number.isInteger(n) && n >= 0);
+}
+
+async function saveAdminGroups() {
+  adminGroupsSaving.value = true;
+  try {
+    const res = await axios.post('/api/bot/settings', { adminGroups: parseAdminGroups(adminGroupsText.value) });
+    applyAdminGroupsFromServer(res.data?.adminGroups);
+  } catch { /* ignore */ } finally {
+    adminGroupsSaving.value = false;
   }
 }
 

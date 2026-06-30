@@ -36,6 +36,8 @@ export function createBotRouter(
     res.json({
       idleTimeoutMinutes: config.idleTimeoutMinutes ?? 0,
       autoPauseOnEmpty: config.autoPauseOnEmpty,
+      localAudioEnabled: config.localAudioEnabled,
+      adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
     });
   });
@@ -43,7 +45,7 @@ export function createBotRouter(
   // POST /api/bot/settings — 保存全局 bot 行为设置 (gated: changing global bot
   // behavior is a bot.manage operation, consistent with PR #80's permission model)
   router.post("/settings", requirePermission("bot.manage"), (req, res) => {
-    const { idleTimeoutMinutes, autoPauseOnEmpty, guestMode } = req.body;
+    const { idleTimeoutMinutes, autoPauseOnEmpty, localAudioEnabled, guestMode, adminGroups } = req.body;
 
     const hasIdle = idleTimeoutMinutes !== undefined;
     if (hasIdle && (typeof idleTimeoutMinutes !== "number" || idleTimeoutMinutes < 0)) {
@@ -52,9 +54,11 @@ export function createBotRouter(
     }
 
     const hasAutoPause = typeof autoPauseOnEmpty === "boolean";
+    const hasLocalAudioEnabled = typeof localAudioEnabled === "boolean";
 
     if (hasIdle) config.idleTimeoutMinutes = idleTimeoutMinutes;
     if (hasAutoPause) config.autoPauseOnEmpty = autoPauseOnEmpty;
+    if (hasLocalAudioEnabled) config.localAudioEnabled = localAudioEnabled;
 
     const hasGuestMode = guestMode !== undefined && guestMode !== null && typeof guestMode === "object";
     if (hasGuestMode) {
@@ -72,6 +76,13 @@ export function createBotRouter(
           }
         }
       }
+    }
+
+    if (Array.isArray(adminGroups)) {
+      config.adminGroups = adminGroups.filter(
+        (g: unknown): g is number =>
+          typeof g === "number" && Number.isInteger(g) && g >= 0,
+      );
     }
 
     saveConfig(configPath, config);
@@ -92,6 +103,8 @@ export function createBotRouter(
     res.json({
       idleTimeoutMinutes: config.idleTimeoutMinutes ?? 0,
       autoPauseOnEmpty: config.autoPauseOnEmpty,
+      localAudioEnabled: config.localAudioEnabled,
+      adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
     });
   });

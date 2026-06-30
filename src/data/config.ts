@@ -22,6 +22,8 @@ export interface BotConfig {
   autoReturnDelay: number;
   autoPauseOnEmpty: boolean;
   idleTimeoutMinutes: number;
+  /** Enable uploading and playback of server-stored local audio files. */
+  localAudioEnabled: boolean;
   // Public base URL used when generating share links (e.g. the bot专属链接).
   // Leave empty to use the browser's current origin. Example:
   //   "https://music.example.com" or "http://1.2.3.4:3000"
@@ -50,6 +52,7 @@ export function getDefaultConfig(): BotConfig {
     // clients are present). Users can opt in from the web UI.
     autoPauseOnEmpty: false,
     idleTimeoutMinutes: 0,
+    localAudioEnabled: true,
     publicUrl: "",
     trustProxy: false,
     guestMode: {
@@ -63,6 +66,7 @@ export function getDefaultConfig(): BotConfig {
         transport: false,
         removeClear: false,
         playMode: false,
+        playCollection: false,
       },
     },
   };
@@ -104,9 +108,20 @@ export function loadConfig(path: string): BotConfig {
       gm.permissions[f] = gm.permissions[f] === true;
     }
 
+    // Sanitize adminGroups on load too: the WebUI write path filters it, but a
+    // hand-edited / legacy / corrupt config.json reaches the command gate
+    // directly. Keep only non-negative integers; a non-array falls back to the
+    // default []. Mirrors the guestMode sanitization above.
+    const adminGroups = Array.isArray(partial.adminGroups)
+      ? partial.adminGroups.filter(
+          (g): g is number => typeof g === "number" && Number.isInteger(g) && g >= 0,
+        )
+      : defaults.adminGroups;
+
     return {
       ...defaults,
       ...partial,
+      adminGroups,
       guestMode: gm,
     };
   } catch {

@@ -38,6 +38,7 @@ export interface WebServerOptions {
   neteaseProvider: MusicProvider;
   qqProvider: MusicProvider;
   bilibiliProvider: MusicProvider;
+  localProvider: MusicProvider;
   database: BotDatabase;
   config: BotConfig;
   configPath: string;
@@ -123,7 +124,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
   );
   app.use(
     "/api/music",
-    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger)
+    createMusicRouter(options.neteaseProvider, options.qqProvider, options.bilibiliProvider, logger, options.localProvider, options.config)
   );
   app.use("/api/player", createPlayerRouter(
     options.botManager, logger, options.database,
