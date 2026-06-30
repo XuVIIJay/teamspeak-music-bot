@@ -301,6 +301,7 @@ const guest = (perms: Partial<Record<string, boolean>> = {}) => ({
     transport: false,
     removeClear: false,
     playMode: false,
+    playCollection: false,
     ...perms,
   },
 });
@@ -373,7 +374,19 @@ describe("guest enforcement on player routes", () => {
     expect((await request(mountGuest({ transport: true })).post(`/api/player/${ALLOWED_BOT}/add-song`).send({ song: SONG })).status).toBe(403);
   });
 
-  it("guests are always denied /play, /prev, /stop, /play-song, /play-at, /play-playlist, /play-album, /playlist, /profile even with ALL flags on", async () => {
+  it("playCollection flag gates /play-playlist, /play-album (issue #103)", async () => {
+    const allow = mountGuest({ playCollection: true });
+    const deny = mountGuest({ playCollection: false });
+    expect((await request(allow).post(`/api/player/${ALLOWED_BOT}/play-playlist`).send({ playlistId: "1" })).status).not.toBe(403);
+    expect((await request(allow).post(`/api/player/${ALLOWED_BOT}/play-album`).send({ albumId: "1" })).status).not.toBe(403);
+    expect((await request(deny).post(`/api/player/${ALLOWED_BOT}/play-playlist`).send({ playlistId: "1" })).status).toBe(403);
+    expect((await request(deny).post(`/api/player/${ALLOWED_BOT}/play-album`).send({ albumId: "1" })).status).toBe(403);
+    // playCollection does NOT leak into the destructive single-song / queue ops.
+    expect((await request(allow).post(`/api/player/${ALLOWED_BOT}/play`).send({ query: "x" })).status).toBe(403);
+    expect((await request(allow).post(`/api/player/${ALLOWED_BOT}/play-song`).send({ song: SONG })).status).toBe(403);
+  });
+
+  it("guests are always denied /play, /prev, /stop, /play-song, /play-at, /playlist, /profile even with ALL flags on", async () => {
     const all = mountGuest({
       addToQueue: true,
       playNext: true,
@@ -382,14 +395,13 @@ describe("guest enforcement on player routes", () => {
       transport: true,
       removeClear: true,
       playMode: true,
+      playCollection: true,
     });
     expect((await request(all).post(`/api/player/${ALLOWED_BOT}/play`).send({ query: "x" })).status).toBe(403);
     expect((await request(all).post(`/api/player/${ALLOWED_BOT}/prev`)).status).toBe(403);
     expect((await request(all).post(`/api/player/${ALLOWED_BOT}/stop`)).status).toBe(403);
     expect((await request(all).post(`/api/player/${ALLOWED_BOT}/play-song`).send({ song: SONG })).status).toBe(403);
     expect((await request(all).post(`/api/player/${ALLOWED_BOT}/play-at`).send({ index: 0 })).status).toBe(403);
-    expect((await request(all).post(`/api/player/${ALLOWED_BOT}/play-playlist`).send({ playlistId: "1" })).status).toBe(403);
-    expect((await request(all).post(`/api/player/${ALLOWED_BOT}/play-album`).send({ albumId: "1" })).status).toBe(403);
     expect((await request(all).post(`/api/player/${ALLOWED_BOT}/playlist`).send({ playlistId: "1" })).status).toBe(403);
     expect((await request(all).put(`/api/player/${ALLOWED_BOT}/profile`).send({})).status).toBe(403);
   });

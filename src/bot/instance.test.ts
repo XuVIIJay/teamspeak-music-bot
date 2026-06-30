@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { BotInstance } from "./instance.js";
+import { describe, it, expect, vi } from "vitest";
+import { BotInstance, COMMAND_DENIED_MESSAGE } from "./instance.js";
+import type { TS3TextMessage } from "../ts-protocol/client.js";
 
 // Constructing a real BotInstance is heavy (spawns a TS3Client, AudioPlayer,
 // reads avatars, etc.), and runExclusive only touches a single private field
@@ -108,5 +109,104 @@ describe("BotInstance.runExclusive — serialization", () => {
       "Z-start",
       "Z-end",
     ]);
+  });
+});
+
+/** Minimal `this` carrying only what handleTextMessage's gate path touches.
+ *  The gate methods live on the prototype and are attached here so calls like
+ *  `this.isCommandAllowed(...)` resolve against this same object. */
+function makeGateCtx(opts: {
+  adminGroups?: number[];
+  lookupGroups?: string[];
+  lookupThrows?: boolean;
+}) {
+  const ctx: any = {
+    config: { commandPrefix: "!", commandAliases: {}, adminGroups: opts.adminGroups ?? [] },
+    logger: { info: vi.fn(), error: vi.fn() },
+    tsClient: {
+      sendTextMessage: vi.fn(async () => {}),
+      getClientServerGroups: vi.fn(async () => {
+        if (opts.lookupThrows) throw new Error("query failed");
+        return opts.lookupGroups ?? [];
+      }),
+    },
+    executeCommand: vi.fn(async () => null),
+    isCommandAllowed: (BotInstance.prototype as any).isCommandAllowed,
+    lookupInvokerGroups: (BotInstance.prototype as any).lookupInvokerGroups,
+  };
+  return ctx;
+}
+
+function makeMsg(message: string, invokerGroups: string[] = [], invokerId = "5"): TS3TextMessage {
+  return { invokerName: "Tester", invokerId, invokerUid: "uid", message, targetMode: 2, invokerGroups };
+}
+
+const handleTextMessage = (BotInstance.prototype as any).handleTextMessage as (
+  this: unknown,
+  msg: TS3TextMessage,
+) => Promise<void>;
+
+describe("BotInstance.handleTextMessage — command permission gate", () => {
+  it("runs a public command with no group lookup, even under enforcement", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6] });
+    await handleTextMessage.call(ctx, makeMsg("!play 晴天", ["6"]));
+    expect(ctx.executeCommand).toHaveBeenCalledTimes(1);
+    expect(ctx.tsClient.getClientServerGroups).not.toHaveBeenCalled();
+    expect(ctx.tsClient.sendTextMessage).not.toHaveBeenCalledWith(COMMAND_DENIED_MESSAGE);
+  });
+
+  it("runs an admin command with no lookup when enforcement is off", async () => {
+    const ctx = makeGateCtx({ adminGroups: [] });
+    await handleTextMessage.call(ctx, makeMsg("!stop"));
+    expect(ctx.executeCommand).toHaveBeenCalledTimes(1);
+    expect(ctx.tsClient.getClientServerGroups).not.toHaveBeenCalled();
+  });
+
+  it("allows an enforced admin command when the live lookup returns a matching group", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: ["6"] });
+    await handleTextMessage.call(ctx, makeMsg("!stop"));
+    expect(ctx.tsClient.getClientServerGroups).toHaveBeenCalledTimes(1);
+    expect(ctx.executeCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("denies an enforced admin command when the live lookup has no matching group", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: ["8"] });
+    await handleTextMessage.call(ctx, makeMsg("!stop"));
+    expect(ctx.executeCommand).not.toHaveBeenCalled();
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith(COMMAND_DENIED_MESSAGE);
+  });
+
+  it("fails closed when the live lookup returns no groups", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: [] });
+    await handleTextMessage.call(ctx, makeMsg("!stop"));
+    expect(ctx.executeCommand).not.toHaveBeenCalled();
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith(COMMAND_DENIED_MESSAGE);
+  });
+
+  it("fails closed when the live lookup throws", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupThrows: true });
+    await handleTextMessage.call(ctx, makeMsg("!stop"));
+    expect(ctx.executeCommand).not.toHaveBeenCalled();
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith(COMMAND_DENIED_MESSAGE);
+  });
+
+  it("ignores stale event groups: a demoted sender (cached match) is denied by the live lookup", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: ["8"] });
+    await handleTextMessage.call(ctx, makeMsg("!stop", ["6"]));
+    expect(ctx.executeCommand).not.toHaveBeenCalled();
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith(COMMAND_DENIED_MESSAGE);
+  });
+
+  it("uses live groups, not stale event groups: a freshly-promoted sender is allowed", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: ["6"] });
+    await handleTextMessage.call(ctx, makeMsg("!stop", ["8"]));
+    expect(ctx.executeCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves out-of-channel senders server-wide: empty event groups but a matching live group → allowed", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: ["6"] });
+    await handleTextMessage.call(ctx, makeMsg("!stop", [], "5"));
+    expect(ctx.tsClient.getClientServerGroups).toHaveBeenCalledTimes(1);
+    expect(ctx.executeCommand).toHaveBeenCalledTimes(1);
   });
 });

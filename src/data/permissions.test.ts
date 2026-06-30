@@ -105,6 +105,7 @@ describe("resolvePermissionContext guest branch", () => {
       permissions: {
         addToQueue: true, playNext: false, playNow: false,
         skip: true, transport: false, removeClear: false, playMode: false,
+        playCollection: false,
       },
     });
     expect([...ctx.capabilities]).toEqual([]);
@@ -120,14 +121,15 @@ describe("resolvePermissionContext guest branch", () => {
       permissions: {
         addToQueue: true, playNext: false, playNow: false,
         skip: false, transport: false, removeClear: false, playMode: false,
+        playCollection: false,
       },
     });
     expect(ctx.bots).toBe("all");
   });
 
-  it("exposes the 7 canonical flags", () => {
+  it("exposes the 8 canonical flags", () => {
     expect([...GUEST_PERMISSION_FLAGS].sort()).toEqual(
-      ["addToQueue", "playMode", "playNext", "playNow", "removeClear", "skip", "transport"].sort()
+      ["addToQueue", "playCollection", "playMode", "playNext", "playNow", "removeClear", "skip", "transport"].sort()
     );
   });
 });

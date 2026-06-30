@@ -115,6 +115,7 @@ describe("guestMode config", () => {
     expect(c.guestMode.permissions).toEqual({
       addToQueue: true, playNext: false, playNow: false,
       skip: false, transport: false, removeClear: false, playMode: false,
+      playCollection: false,
     });
   });
 
@@ -167,13 +168,40 @@ describe("guestMode config", () => {
     });
     it("a string permissions value yields defaults with no numeric index keys", () => {
       const gm = loadGuestMode({ guestMode: { permissions: "hacked" } });
-      // 7 known flags present at their defaults
+      // all known flags present at their defaults
       expect(gm.permissions).toEqual({
         addToQueue: true, playNext: false, playNow: false,
         skip: false, transport: false, removeClear: false, playMode: false,
+        playCollection: false,
       });
       // no garbage index keys leaked from spreading a string
       expect((gm.permissions as unknown as Record<string, unknown>)["0"]).toBeUndefined();
     });
+  });
+});
+
+describe("adminGroups normalization", () => {
+  function loadAdminGroups(raw: unknown) {
+    const dir = mkdtempSync(join(tmpdir(), "tsmb-cfg-"));
+    const p = join(dir, "config.json");
+    writeFileSync(p, JSON.stringify(raw));
+    try {
+      return loadConfig(p).adminGroups;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("defaults to [] when absent", () => {
+    expect(loadAdminGroups({})).toEqual([]);
+  });
+  it("keeps valid non-negative integers", () => {
+    expect(loadAdminGroups({ adminGroups: [6, 8] })).toEqual([6, 8]);
+  });
+  it("filters out negatives, non-integers and non-numbers", () => {
+    expect(loadAdminGroups({ adminGroups: [6, -1, 2.5, "8", null] })).toEqual([6]);
+  });
+  it("a non-array value falls back to the default [] (no crash)", () => {
+    expect(loadAdminGroups({ adminGroups: "6" })).toEqual([]);
   });
 });

@@ -17,7 +17,7 @@
             {{ songs.length }} 首歌曲
           </div>
           <div class="playlist-actions">
-            <button class="play-all-btn" @click="playAll">
+            <button v-if="canPlayAll" class="play-all-btn" @click="playAll">
               <Icon icon="mdi:play" />
               播放全部
             </button>
@@ -54,16 +54,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { Icon } from '@iconify/vue';
 import axios from 'axios';
 import { usePlayerStore } from '../stores/player.js';
+import { useSession } from '../composables/useSession.js';
 import CoverArt from '../components/CoverArt.vue';
 import SongCard from '../components/SongCard.vue';
 
 const store = usePlayerStore();
 const route = useRoute();
+const { can, guestCan } = useSession();
+
+// "Play all" loads + plays the whole collection (clears the queue). Members
+// need player.control; guests need the playCollection flag (issue #103).
+const canPlayAll = computed(() => can('player.control') || guestCan('playCollection'));
 
 import { Song } from '../stores/player.js';
 
