@@ -217,6 +217,7 @@ describe("session router — guest mode", () => {
         transport: false,
         removeClear: false,
         playMode: false,
+        playCollection: false,
       },
       guestBots: "all",
     });

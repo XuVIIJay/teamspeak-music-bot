@@ -158,6 +158,44 @@ describe("bot router /settings", () => {
       expect(bot.autoPauseCalls).toEqual([]);
     }
   });
+
+  it("GET /settings includes adminGroups reflecting config", async () => {
+    config.adminGroups = [6, 8];
+    const res = await request(app).get("/api/bot/settings").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.adminGroups).toEqual([6, 8]);
+  });
+
+  it("POST /settings persists a validated adminGroups and GET returns it", async () => {
+    const res = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ adminGroups: [6, 8] });
+    expect(res.status).toBe(200);
+    expect(res.body.adminGroups).toEqual([6, 8]);
+    expect(config.adminGroups).toEqual([6, 8]);
+    const followUp = await request(app).get("/api/bot/settings").set("Cookie", cookie);
+    expect(followUp.body.adminGroups).toEqual([6, 8]);
+  });
+
+  it("POST /settings filters invalid adminGroups entries (negative, non-integer, non-number)", async () => {
+    const res = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ adminGroups: [6, -1, 2.5, "x", 8] });
+    expect(res.status).toBe(200);
+    expect(config.adminGroups).toEqual([6, 8]);
+  });
+
+  it("POST /settings ignores a non-array adminGroups (leaves config unchanged)", async () => {
+    config.adminGroups = [6];
+    const res = await request(app)
+      .post("/api/bot/settings")
+      .set("Cookie", cookie)
+      .send({ adminGroups: "6" });
+    expect(res.status).toBe(200);
+    expect(config.adminGroups).toEqual([6]);
+  });
 });
 
 describe("bot router /settings guest-mode gating + persistence", () => {

@@ -9,7 +9,7 @@ import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Song } from "../music/provider.js";
 import {
   parseCommand,
-  isAdminCommand,
+  canRunCommand,
   type ParsedCommand,
 } from "./commands.js";
 import { parseSongRef, parseSelectionIndex } from "./song-ref.js";
@@ -24,6 +24,9 @@ import {
   shouldResumeOnReturn,
 } from "./auto-pause.js";
 
+/** Reply sent when a non-admin invokes an admin-only chat command. */
+export const COMMAND_DENIED_MESSAGE = "⛔ 需要管理员权限（该命令仅限管理员服务器组）";
+
 export interface BotInstanceOptions {
   id: string;
   name: string;
@@ -32,6 +35,7 @@ export interface BotInstanceOptions {
   qqProvider: MusicProvider;
   bilibiliProvider: MusicProvider;
   youtubeProvider: MusicProvider;
+  localProvider?: MusicProvider;
   database: BotDatabase;
   config: BotConfig;
   logger: Logger;
@@ -49,6 +53,8 @@ export interface BotStatus {
   volume: number;
   playMode: PlayMode;
   elapsed: number; // ground truth elapsed seconds from frame count
+  /** 当前曲实际播放时长（秒）。试听片段=试听秒数；完整曲=duration。缺失时前端回退 currentSong.duration。 */
+  effectiveDuration?: number;
 }
 
 export class BotInstance extends EventEmitter {
@@ -62,6 +68,7 @@ export class BotInstance extends EventEmitter {
   private qqProvider: MusicProvider;
   private bilibiliProvider: MusicProvider;
   private youtubeProvider: MusicProvider;
+  private localProvider: MusicProvider;
   private database: BotDatabase;
   private config: BotConfig;
   private logger: Logger;
@@ -78,6 +85,8 @@ export class BotInstance extends EventEmitter {
   private fmProvider: MusicProvider | null = null;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
+  /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
+  private effectiveDuration: number | undefined;
   private playGate: Promise<unknown> = Promise.resolve();
 
   constructor(options: BotInstanceOptions) {
@@ -88,6 +97,7 @@ export class BotInstance extends EventEmitter {
     this.qqProvider = options.qqProvider;
     this.bilibiliProvider = options.bilibiliProvider;
     this.youtubeProvider = options.youtubeProvider;
+    this.localProvider = options.localProvider ?? options.neteaseProvider;
     this.database = options.database;
     this.config = options.config;
     this.logger = options.logger.child({ botId: this.id });
@@ -140,6 +150,41 @@ export class BotInstance extends EventEmitter {
     });
   }
 
+  isLocalAudioEnabled(): boolean {
+    return this.config.localAudioEnabled !== false;
+  }
+
+  /**
+   * Reference-aware cleanup of uploaded local audio files. Delegates to the
+   * local provider, which deletes a file only when it has been played AND is
+   * no longer referenced by ANY bot's queue — so loop replays, prev, the song
+   * being re-started, and the same upload queued on another bot are all safe.
+   * Call this AFTER the queue mutation, so released songs are unreferenced
+   * (and deleted) while songs that remain queued are preserved.
+   */
+  cleanupQueuedLocalSongs(reason: string): void {
+    this.sweepLocalAudio(reason);
+  }
+
+  private sweepLocalAudio(reason: string): void {
+    const provider = this.localProvider as MusicProvider & {
+      sweepUnreferenced?: () => string[];
+    };
+    if (typeof provider.sweepUnreferenced !== "function") return;
+    try {
+      const deleted = provider.sweepUnreferenced();
+      if (deleted.length) {
+        this.logger.info({ count: deleted.length, reason }, "Cleaned up local audio files");
+      }
+    } catch (err) {
+      this.logger.warn({ err, reason }, "Local audio cleanup failed");
+    }
+  }
+
+  private isSameSong(a: QueuedSong | Song | null | undefined, b: QueuedSong | Song | null | undefined): boolean {
+    return !!a && !!b && a.platform === b.platform && a.id === b.id;
+  }
+
   private setupTsEvents(): void {
     this.tsClient.on("textMessage", (msg: TS3TextMessage) => {
       this.handleTextMessage(msg).catch((err) => {
@@ -154,6 +199,8 @@ export class BotInstance extends EventEmitter {
       // short-circuited on !this.connected, leaving player stuck as "playing".
       this.connected = false;
       this.player.stop();
+      this.queue.clear();
+      this.sweepLocalAudio("disconnected");
       // A lifecycle change must not leave a stale auto-resume armed.
       this.autoPaused = false;
       // Only emit externally once per lifecycle so clients don't see a
@@ -235,6 +282,8 @@ export class BotInstance extends EventEmitter {
   disconnect(): void {
     this._cancelIdleTimer();
     this.player.stop();
+    this.queue.clear();
+    this.sweepLocalAudio("disconnected");
     this.connected = false;
     if (!this.disconnectEmitted) {
       this.disconnectEmitted = true;
@@ -322,8 +371,17 @@ export class BotInstance extends EventEmitter {
     );
     if (!parsed) return;
 
-    if (isAdminCommand(parsed.name)) {
-      // TODO: Check if invoker is in adminGroups
+    if (!(await this.isCommandAllowed(parsed.name, msg))) {
+      this.logger.info(
+        { command: parsed.name, invoker: msg.invokerName },
+        "Command denied: invoker not in adminGroups"
+      );
+      try {
+        await this.tsClient.sendTextMessage(COMMAND_DENIED_MESSAGE);
+      } catch (sendErr) {
+        this.logger.error({ err: sendErr }, "Failed to send permission-denied message to chat");
+      }
+      return;
     }
 
     this.logger.info(
@@ -345,6 +403,41 @@ export class BotInstance extends EventEmitter {
       } catch (sendErr) {
         this.logger.error({ err: sendErr }, "Failed to send error message to chat");
       }
+    }
+  }
+
+  /**
+   * Decide whether a chat command may run for this sender. Reads adminGroups
+   * live from this.config. Public commands and the enforcement-off case are
+   * allowed with NO query. For an ENFORCED admin command we resolve the
+   * sender's CURRENT server groups with a targeted server-wide lookup rather
+   * than trusting the text event's cached groups — those are empty for
+   * out-of-channel senders and stale after a live promotion/demotion. Fails
+   * closed when the groups can't be determined.
+   */
+  private async isCommandAllowed(commandName: string, msg: TS3TextMessage): Promise<boolean> {
+    const adminGroups = this.config.adminGroups;
+    // Public command, or enforcement off → allow without any lookup.
+    // (canRunCommand with empty groups is true iff the command is public OR
+    // adminGroups is empty.)
+    if (canRunCommand(commandName, [], adminGroups)) return true;
+    // Enforced admin command: authoritative decision uses freshly-resolved,
+    // server-wide groups. Fail closed if they can't be determined.
+    const groups = await this.lookupInvokerGroups(msg.invokerId);
+    return canRunCommand(commandName, groups, adminGroups);
+  }
+
+  /**
+   * Resolve the sender's current server groups by client id, server-wide.
+   * Returns [] on a bad id or query failure (→ fail-closed deny upstream).
+   */
+  private async lookupInvokerGroups(invokerId: string): Promise<string[]> {
+    const clid = Number(invokerId);
+    if (!Number.isFinite(clid) || clid <= 0) return [];
+    try {
+      return await this.tsClient.getClientServerGroups(clid);
+    } catch {
+      return [];
     }
   }
 
@@ -431,9 +524,10 @@ export class BotInstance extends EventEmitter {
     }
   }
 
-  getProviderFor(platform: "netease" | "qq" | "bilibili" | "youtube"): MusicProvider {
+  getProviderFor(platform: "netease" | "qq" | "bilibili" | "youtube" | "local"): MusicProvider {
     if (platform === "bilibili") return this.bilibiliProvider;
     if (platform === "youtube") return this.youtubeProvider;
+    if (platform === "local") return this.localProvider;
     return platform === "qq" ? this.qqProvider : this.neteaseProvider;
   }
 
@@ -455,14 +549,18 @@ export class BotInstance extends EventEmitter {
       this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
       return false;
     }
+    if (song.platform === "local" && !this.isLocalAudioEnabled()) {
+      this.logger.warn({ songId: song.id, name: song.name }, "Local audio playback disabled — refusing track");
+      return false;
+    }
     // Clear any accumulated skip votes — every fresh track starts with a
     // clean slate, regardless of which code path loaded it (cmdPlay,
     // cmdPlaylist, cmdAlbum, cmdFm, trackEnd auto-advance, etc.).
     this.voteSkipUsers.clear();
     const provider = this.getProviderFor(song.platform);
     try {
-      const url = await provider.getSongUrl(song.id);
-      if (!url) {
+      const result = await provider.getSongUrl(song.id);
+      if (!result?.url) {
         this.logger.warn({ songId: song.id, name: song.name }, "No URL available, skipping");
         return false;
       }
@@ -478,8 +576,10 @@ export class BotInstance extends EventEmitter {
         );
         return false;
       }
-      song.url = url;
-      this.player.play(url, 0, song.duration);
+      song.url = result.url;
+      // 试听片段用试听时长（让 player nearEnd 正确触发自动切歌）；完整曲回退 song.duration
+      this.effectiveDuration = result.trialDuration ?? song.duration;
+      this.player.play(result.url, 0, this.effectiveDuration);
       // Fresh playback (re)start — clear auto-pause so a later occupancy
       // change won't try to "resume" a track the user already restarted.
       this.autoPaused = false;
@@ -568,6 +668,10 @@ export class BotInstance extends EventEmitter {
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const song0 = song!;
+    const previous = this.queue.current();
+    if (previous && !this.isSameSong(previous, song0)) {
+      this.player.stop();
+    }
     this.queue.clear();
     this.disableFmMode();
     this.queue.add({ ...song0 });
@@ -576,6 +680,7 @@ export class BotInstance extends EventEmitter {
     // Reset failure counter on user-initiated play
     this.player.resetFailures();
     const ok = await this.resolveAndPlay(this.queue.current()!);
+    this.sweepLocalAudio("replaced");
     if (!ok) {
       const d = await this.getAuthDiag(song0.platform as "netease" | "qq");
       return `无法播放: ${song0.name}\n${d.status}\n${d.hint}`;
@@ -665,6 +770,7 @@ export class BotInstance extends EventEmitter {
     this.player.stop();
     this.autoPaused = false;
     this.queue.clear();
+    this.sweepLocalAudio("stopped");
     this.disableFmMode();
     this.profileManager.onSongChange(null).catch((err) => {
       this.logger.warn({ err }, "Profile restore failed on stop");
@@ -723,6 +829,7 @@ export class BotInstance extends EventEmitter {
   private cmdClear(): string {
     this.player.stop();
     this.queue.clear();
+    this.sweepLocalAudio("queue_cleared");
     this.disableFmMode();
     this.profileManager.onSongChange(null).catch((err) => {
       this.logger.warn({ err }, "Profile restore failed on clear");
@@ -736,6 +843,9 @@ export class BotInstance extends EventEmitter {
     if (isNaN(index) || index < 0) return "Usage: !remove <number>";
     const removed = this.queue.remove(index);
     if (!removed) return "Invalid position";
+    // Sweep after the entry is gone — the file is deleted only if no other
+    // queue position (or bot) still references this upload.
+    this.sweepLocalAudio("removed_from_queue");
     this.emit("stateChange");
     return `Removed: ${removed.name}`;
   }
@@ -795,6 +905,7 @@ export class BotInstance extends EventEmitter {
     const songs = await provider.getPlaylistSongs(playlistId);
     if (songs.length === 0) return "Playlist is empty or not found";
 
+    this.player.stop();
     this.queue.clear();
     this.disableFmMode();
     for (const song of songs) {
@@ -803,6 +914,7 @@ export class BotInstance extends EventEmitter {
     const first = this.queue.play();
     let ok = true;
     if (first) ok = await this.resolveAndPlay(first);
+    this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
     if (!ok) {
       const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
@@ -835,6 +947,7 @@ export class BotInstance extends EventEmitter {
     const songs = await provider.getAlbumSongs(albumId);
     if (songs.length === 0) return "Album is empty or not found";
 
+    this.player.stop();
     this.queue.clear();
     this.disableFmMode();
     for (const song of songs) {
@@ -843,6 +956,7 @@ export class BotInstance extends EventEmitter {
     const first = this.queue.play();
     let ok = true;
     if (first) ok = await this.resolveAndPlay(first);
+    this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
     if (!ok) {
       const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
@@ -869,6 +983,7 @@ export class BotInstance extends EventEmitter {
     if (songs.length === 0)
       return "No FM songs available (need to login first)";
 
+    this.player.stop();
     this.queue.clear();
     for (const song of songs) {
       this.queue.add({ ...song, platform: provider.platform });
@@ -881,6 +996,7 @@ export class BotInstance extends EventEmitter {
     const first = this.queue.play();
     let ok = true;
     if (first) ok = await this.resolveAndPlay(first);
+    this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
     if (!ok) {
       const d = await this.getAuthDiag("netease");
@@ -907,6 +1023,7 @@ export class BotInstance extends EventEmitter {
       filtered = result.songs.slice(0, 20);
     }
 
+    this.player.stop();
     this.queue.clear();
     this.disableFmMode();
     for (const song of filtered) {
@@ -918,6 +1035,7 @@ export class BotInstance extends EventEmitter {
     const first = this.queue.play();
     let ok = true;
     if (first) ok = await this.resolveAndPlay(first);
+    this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
     if (!ok) {
       const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
@@ -1104,10 +1222,10 @@ export class BotInstance extends EventEmitter {
   async playNext(maxRetries = 3): Promise<boolean> {
     if (this.isAdvancing || !this.connected) return false;
     this.isAdvancing = true;
+    let started = false;
     try {
       this.voteSkipUsers.clear();
       const next = this.queue.next();
-      let started = false;
       if (next) {
         started = await this.resolveAndPlay(next);
         if (!started) {
@@ -1147,6 +1265,10 @@ export class BotInstance extends EventEmitter {
       this.emit("stateChange");
       return started;
     } finally {
+      // Reference-aware sweep: a finished local song that still sits in the
+      // queue (sequential history, loop/repeat, or queued on another bot) is
+      // preserved; only uploads no longer referenced anywhere are deleted.
+      this.sweepLocalAudio("playback_finished");
       this.isAdvancing = false;
     }
   }
@@ -1179,6 +1301,7 @@ export class BotInstance extends EventEmitter {
       volume: this.player.getVolume(),
       playMode: this.queue.getMode(),
       elapsed: this.player.getElapsed(),
+      effectiveDuration: this.effectiveDuration,
     };
   }
 

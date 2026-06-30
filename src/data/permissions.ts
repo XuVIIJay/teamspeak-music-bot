@@ -29,6 +29,8 @@ export interface GuestPermissions {
   transport: boolean;
   removeClear: boolean;
   playMode: boolean;
+  /** Load + play an entire playlist/album (clears the queue). Issue #103. */
+  playCollection: boolean;
 }
 
 export const GUEST_PERMISSION_FLAGS = [
@@ -39,6 +41,7 @@ export const GUEST_PERMISSION_FLAGS = [
   "transport",
   "removeClear",
   "playMode",
+  "playCollection",
 ] as const;
 export type GuestFlag = (typeof GUEST_PERMISSION_FLAGS)[number];
 

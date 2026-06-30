@@ -7,6 +7,7 @@ import { createApiServerManager } from "./music/api-server.js";
 import { NeteaseProvider } from "./music/netease.js";
 import { QQMusicProvider } from "./music/qq.js";
 import { BiliBiliProvider } from "./music/bilibili.js";
+import { LocalMusicProvider } from "./music/local.js";
 import { createCookieStore } from "./music/auth.js";
 import { createAvatarStore } from "./data/avatars.js";
 import { createPermissionStore } from "./data/permissions.js";
@@ -25,6 +26,7 @@ const DB_PATH = path.join(DATA_DIR, "tsmusicbot.db");
 const LOG_DIR = path.join(DATA_DIR, "logs");
 const COOKIE_DIR = path.join(DATA_DIR, "cookies");
 const AVATAR_DIR = path.join(DATA_DIR, "avatars");
+const LOCAL_AUDIO_DIR = path.join(DATA_DIR, "local-audio");
 const STATIC_DIR = path.join(ROOT_DIR, "web", "dist");
 
 async function main() {
@@ -54,6 +56,7 @@ async function main() {
   const neteaseProvider = new NeteaseProvider(apiServer.getNeteaseBaseUrl());
   const qqProvider = new QQMusicProvider(apiServer.getQQMusicBaseUrl());
   const bilibiliProvider = new BiliBiliProvider();
+  const localProvider = new LocalMusicProvider(LOCAL_AUDIO_DIR);
 
   const cookieStore = createCookieStore(COOKIE_DIR);
   const avatarStore = createAvatarStore(AVATAR_DIR);
@@ -75,7 +78,8 @@ async function main() {
     logger,
     avatarStore,
     permissions,
-    CONFIG_PATH
+    CONFIG_PATH,
+    localProvider
   );
   await botManager.loadSavedBots();
 
@@ -85,6 +89,7 @@ async function main() {
     neteaseProvider,
     qqProvider,
     bilibiliProvider,
+    localProvider,
     database: db,
     avatarStore,
     config,
