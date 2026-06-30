@@ -6,6 +6,7 @@ export interface Song {
   duration: number; // seconds
   coverUrl: string;
   platform: "netease" | "qq" | "bilibili" | "youtube" | "local";
+  fee?: number; // 0=免费, 1=VIP, 4=付费专辑, 8=付费单曲
   /** VIP / copyright-restricted: non-VIP users can only play a trial fragment
    *  (NetEase fee=1 VIP / fee=4 album-only, or QQ pay.payplay/paytrackprice=1). */
   vip?: boolean;

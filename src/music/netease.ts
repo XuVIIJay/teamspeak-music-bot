@@ -79,6 +79,7 @@ export function mapNeteaseSongs(raw: any[] | null | undefined): Song[] {
     duration: Math.round((s.dt ?? s.duration ?? 0) / 1000),
     coverUrl: s.al?.picUrl ?? s.album?.picUrl ?? "",
     platform: "netease",
+    fee: s.fee ?? 0,
     // fee: 0=free, 1=VIP, 4=album-only, 8=free low-quality (plays in full, NOT vip)
     vip: s.fee === 1 || s.fee === 4,
   }));
