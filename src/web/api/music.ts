@@ -1,30 +1,94 @@
-import { Router } from "express";
+import express, { Router } from "express";
 import type { MusicProvider } from "../../music/provider.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { Logger } from "../../logger.js";
+import type { BotConfig } from "../../data/config.js";
 import { requirePermission } from "../middleware/requirePermission.js";
 import { requireNotGuest } from "../middleware/requireNotGuest.js";
+import { authorize } from "../middleware/authorize.js";
 
 export function createMusicRouter(
   neteaseProvider: MusicProvider,
   qqProvider: MusicProvider,
   bilibiliProvider: MusicProvider,
-  logger: Logger
+  logger: Logger,
+  localProvider?: MusicProvider,
+  config?: BotConfig
 ): Router {
   const router = Router();
   const youtubeProvider: MusicProvider = new YouTubeProvider();
 
+  function isLocalAudioEnabled(): boolean {
+    return config?.localAudioEnabled !== false;
+  }
+
   function getProvider(platform?: string): MusicProvider {
     if (platform === "bilibili") return bilibiliProvider;
     if (platform === "youtube") return youtubeProvider;
+    if (platform === "local" && localProvider) return localProvider;
     return platform === "qq" ? qqProvider : neteaseProvider;
   }
+
+  router.post(
+    "/local/upload",
+    authorize({ capability: "player.queue", guestFlag: "addToQueue" }),
+    (_req, res, next) => {
+      if (!isLocalAudioEnabled()) {
+        res.status(403).json({ error: "本地音频播放已关闭" });
+        return;
+      }
+      next();
+    },
+    express.raw({
+      type: ["audio/*", "video/webm", "application/octet-stream"],
+      limit: "200mb",
+    }),
+    async (req, res) => {
+      try {
+        if (!localProvider) {
+          res.status(501).json({ error: "Local upload is not configured" });
+          return;
+        }
+        const uploadCapable = localProvider as MusicProvider & {
+          uploadAudio?: (input: { buffer: Buffer; originalName: string; mimeType?: string }) => Promise<unknown>;
+        };
+        if (typeof uploadCapable.uploadAudio !== "function") {
+          res.status(501).json({ error: "Local upload is not supported" });
+          return;
+        }
+        if (!Buffer.isBuffer(req.body)) {
+          res.status(400).json({ error: "raw audio body is required" });
+          return;
+        }
+        const headerName = req.header("x-filename") || req.header("x-file-name") || "audio";
+        let originalName = headerName;
+        try {
+          originalName = decodeURIComponent(headerName);
+        } catch {
+          // Keep the raw header value if it is not URI encoded.
+        }
+        const song = await uploadCapable.uploadAudio({
+          buffer: req.body,
+          originalName,
+          mimeType: req.header("content-type") || undefined,
+        });
+        res.json({ song });
+      } catch (err) {
+        logger.warn({ err }, "Local audio upload failed");
+        res.status(400).json({ error: (err as Error).message });
+      }
+    },
+  );
 
   router.get("/search", async (req, res) => {
     try {
       const { q, platform, limit } = req.query;
       if (!q) {
         res.status(400).json({ error: "q (query) is required" });
+        return;
+      }
+      if (platform === "local" && !isLocalAudioEnabled()) {
+        res.json({ songs: [], playlists: [], albums: [] });
         return;
       }
       const provider = getProvider(platform as string);
@@ -47,16 +111,18 @@ export function createMusicRouter(
         return;
       }
       const parsedLimit = parseInt(limit as string) || 20;
-      const [neteaseResult, qqResult, bilibiliResult] = await Promise.allSettled([
+      const [neteaseResult, qqResult, bilibiliResult, localResult] = await Promise.allSettled([
         neteaseProvider.search(q as string, parsedLimit),
         qqProvider.search(q as string, parsedLimit),
         bilibiliProvider.search(q as string, parsedLimit),
+        localProvider && isLocalAudioEnabled() ? localProvider.search(q as string, parsedLimit) : Promise.resolve({ songs: [], albums: [], playlists: [] }),
       ]);
 
       const songs = [
         ...(neteaseResult.status === "fulfilled" ? neteaseResult.value.songs : []),
         ...(qqResult.status === "fulfilled" ? qqResult.value.songs : []),
         ...(bilibiliResult.status === "fulfilled" ? bilibiliResult.value.songs : []),
+        ...(localResult.status === "fulfilled" ? localResult.value.songs : []),
       ];
       const albums = [
         ...(neteaseResult.status === "fulfilled" ? neteaseResult.value.albums : []),
@@ -76,6 +142,10 @@ export function createMusicRouter(
 
   router.get("/song/:id", async (req, res) => {
     try {
+      if (req.query.platform === "local" && !isLocalAudioEnabled()) {
+        res.status(403).json({ error: "本地音频播放已关闭" });
+        return;
+      }
       const provider = getProvider(req.query.platform as string);
       const song = await provider.getSongDetail(req.params.id);
       if (!song) {
@@ -215,6 +285,7 @@ export function createMusicRouter(
       netease: neteaseProvider.getQuality(),
       qq: qqProvider.getQuality(),
       bilibili: bilibiliProvider.getQuality(),
+      local: localProvider?.getQuality() ?? "original",
     });
   });
 

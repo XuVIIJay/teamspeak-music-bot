@@ -16,6 +16,41 @@
           autofocus
         />
       </div>
+
+      <div
+        v-if="localAudioEnabled"
+        class="local-upload"
+        :class="{ dragging: isDragging, uploading }"
+        @dragenter.prevent="isDragging = true"
+        @dragover.prevent="isDragging = true"
+        @dragleave.prevent="isDragging = false"
+        @drop.prevent="handleDrop"
+      >
+        <Icon icon="mdi:tray-arrow-up" class="upload-icon" />
+        <div class="upload-copy">
+          <div class="upload-title">拖拽本地音频到这里上传</div>
+          <div class="upload-subtitle">支持 mp3、flac、wav、m4a、ogg、opus、aac、webm 等格式，上传后可直接播放或加入队列</div>
+        </div>
+        <button class="upload-btn" :disabled="uploading" @click="fileInput?.click()">
+          {{ uploading ? '上传中...' : '选择音频' }}
+        </button>
+        <input
+          ref="fileInput"
+          class="file-input"
+          type="file"
+          multiple
+          accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.opus,.webm,.wma,.alac,.aiff,.ape"
+          @change="handleFileSelect"
+        />
+      </div>
+      <div v-else class="local-upload disabled">
+        <Icon icon="mdi:music-off" class="upload-icon" />
+        <div class="upload-copy">
+          <div class="upload-title">本地音频播放已关闭</div>
+          <div class="upload-subtitle">管理员可在「设置 → 行为设置 → 本地音频播放」中开启。</div>
+        </div>
+      </div>
+      <div v-if="uploadMessage" class="upload-message" :class="uploadMessageType">{{ uploadMessage }}</div>
     </div>
 
     <div v-if="loading" class="loading">搜索中...</div>
@@ -37,6 +72,12 @@
           :class="{ active: selectedSource === 'bilibili' }"
           @click="selectedSource = 'bilibili'"
         >B站</button>
+        <button
+          v-if="hasLocalSongs"
+          class="source-btn"
+          :class="{ active: selectedSource === 'local' }"
+          @click="selectedSource = 'local'"
+        >本地</button>
       </div>
 
       <div class="tab-bar">
@@ -48,7 +89,7 @@
           单曲<span class="tab-count">{{ filteredSongs.length }}</span>
         </button>
         <button
-          v-if="selectedSource !== 'bilibili'"
+          v-if="selectedSource !== 'bilibili' && selectedSource !== 'local'"
           class="tab"
           :class="{ active: activeTab === 'albums' }"
           @click="activeTab = 'albums'"
@@ -56,7 +97,7 @@
           专辑<span class="tab-count">{{ filteredAlbums.length }}</span>
         </button>
         <button
-          v-if="selectedSource !== 'bilibili'"
+          v-if="selectedSource !== 'bilibili' && selectedSource !== 'local'"
           class="tab"
           :class="{ active: activeTab === 'playlists' }"
           @click="activeTab = 'playlists'"
@@ -141,17 +182,19 @@ const router = useRouter();
 
 const SOURCE_STORAGE_KEY = 'search-source';
 
-function loadSource(): 'netease' | 'qq' | 'bilibili' {
+type SearchSource = 'netease' | 'qq' | 'bilibili' | 'local';
+
+function loadSource(): SearchSource {
   try {
     const stored = localStorage.getItem(SOURCE_STORAGE_KEY);
-    if (stored === 'netease' || stored === 'qq' || stored === 'bilibili') return stored;
+    if (stored === 'netease' || stored === 'qq' || stored === 'bilibili' || stored === 'local') return stored;
   } catch { /* localStorage blocked */ }
   return 'netease';
 }
 
 const query = ref((route.query.q as string) || '');
 const activeTab = ref<'songs' | 'albums' | 'playlists'>('songs');
-const selectedSource = ref<'netease' | 'qq' | 'bilibili'>(loadSource());
+const selectedSource = ref<SearchSource>(loadSource());
 
 interface Album { id: string; name: string; artist: string; coverUrl: string; songCount?: number; platform: string; }
 interface Playlist { id: string; name: string; coverUrl: string; songCount?: number; platform: string; }
@@ -161,6 +204,12 @@ const allAlbums = ref<Album[]>([]);
 const allPlaylists = ref<Playlist[]>([]);
 const loading = ref(false);
 const searched = ref(false);
+const uploading = ref(false);
+const isDragging = ref(false);
+const uploadMessage = ref('');
+const uploadMessageType = ref<'info' | 'error'>('info');
+const fileInput = ref<HTMLInputElement | null>(null);
+const localAudioEnabled = ref(true);
 
 const filteredSongs = computed(() =>
   allSongs.value.filter((s) => s.platform === selectedSource.value)
@@ -174,14 +223,16 @@ const filteredPlaylists = computed(() =>
   allPlaylists.value.filter((p) => p.platform === selectedSource.value)
 );
 
+const hasLocalSongs = computed(() => localAudioEnabled.value && allSongs.value.some((s) => s.platform === 'local'));
+
 // Persist source preference
 watch(selectedSource, (src) => {
   try { localStorage.setItem(SOURCE_STORAGE_KEY, src); } catch { /* ignore */ }
 });
 
-// B站 has no albums/playlists — force songs tab when switching to B站
+// B站 / 本地上传没有专辑和歌单页签，切换时强制回到单曲。
 watch(selectedSource, (src) => {
-  if (src === 'bilibili' && activeTab.value !== 'songs') {
+  if ((src === 'bilibili' || src === 'local') && activeTab.value !== 'songs') {
     activeTab.value = 'songs';
   }
 });
@@ -223,10 +274,83 @@ async function doSearch() {
   }
 }
 
+
+function isAudioFile(file: File): boolean {
+  return file.type.startsWith('audio/') || /\.(mp3|flac|wav|m4a|aac|ogg|opus|webm|wma|alac|aiff|ape)$/i.test(file.name);
+}
+
+async function uploadLocalFiles(fileList: File[]) {
+  if (!localAudioEnabled.value) {
+    uploadMessageType.value = 'error';
+    uploadMessage.value = '本地音频播放已关闭';
+    return;
+  }
+  const files = fileList.filter(isAudioFile);
+  if (files.length === 0) {
+    uploadMessageType.value = 'error';
+    uploadMessage.value = '没有找到可上传的音频文件';
+    return;
+  }
+
+  uploading.value = true;
+  uploadMessageType.value = 'info';
+  uploadMessage.value = `正在上传 ${files.length} 个文件...`;
+
+  const uploaded: Song[] = [];
+  const failed: string[] = [];
+  for (const file of files) {
+    try {
+      const res = await axios.post('/api/music/local/upload', file, {
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-Filename': encodeURIComponent(file.name),
+        },
+        maxBodyLength: Infinity,
+      });
+      if (res.data?.song) uploaded.push(res.data.song as Song);
+    } catch (err: any) {
+      failed.push(`${file.name}: ${err?.response?.data?.error || '上传失败'}`);
+    }
+  }
+
+  if (uploaded.length > 0) {
+    const uploadedKeys = new Set(uploaded.map((s) => `${s.platform}-${s.id}`));
+    allSongs.value = [
+      ...uploaded,
+      ...allSongs.value.filter((s) => !uploadedKeys.has(`${s.platform}-${s.id}`)),
+    ];
+    selectedSource.value = 'local';
+    activeTab.value = 'songs';
+    searched.value = true;
+    uploadMessageType.value = failed.length ? 'error' : 'info';
+    uploadMessage.value = failed.length
+      ? `已上传 ${uploaded.length} 个，失败 ${failed.length} 个：${failed[0]}`
+      : `已上传 ${uploaded.length} 个本地音频`;
+  } else {
+    uploadMessageType.value = 'error';
+    uploadMessage.value = failed[0] || '上传失败';
+  }
+
+  uploading.value = false;
+}
+
+function handleDrop(event: DragEvent) {
+  isDragging.value = false;
+  const files = Array.from(event.dataTransfer?.files ?? []);
+  uploadLocalFiles(files);
+}
+
+function handleFileSelect(event: Event) {
+  const input = event.target as HTMLInputElement;
+  uploadLocalFiles(Array.from(input.files ?? []));
+  input.value = '';
+}
+
 function badgeLabel(platform: string): string {
   if (platform === 'qq') return 'QQ';
   if (platform === 'bilibili') return 'B站';
   if (platform === 'youtube') return 'YouTube';
+  if (platform === 'local') return '本地';
   return '网易云';
 }
 
@@ -234,10 +358,24 @@ function badgeClass(platform: string): string {
   if (platform === 'qq') return 'badge-qq';
   if (platform === 'bilibili') return 'badge-bilibili';
   if (platform === 'youtube') return 'badge-youtube';
+  if (platform === 'local') return 'badge-local';
   return 'badge-netease';
 }
 
+async function loadLocalAudioSetting() {
+  try {
+    const res = await axios.get('/api/bot/settings');
+    localAudioEnabled.value = res.data.localAudioEnabled ?? true;
+    if (!localAudioEnabled.value && selectedSource.value === 'local') {
+      selectedSource.value = 'netease';
+    }
+  } catch {
+    // Guests may not be allowed to read settings; backend still enforces the switch.
+  }
+}
+
 onMounted(() => {
+  loadLocalAudioSetting();
   if (query.value) doSearch();
 });
 </script>
@@ -256,6 +394,86 @@ onMounted(() => {
 
 .search-header {
   margin-bottom: 24px;
+}
+
+.local-upload {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  transition: border-color var(--transition-fast), background var(--transition-fast), transform var(--transition-fast);
+
+  &.dragging {
+    border-color: var(--color-primary);
+    background: var(--color-primary-10);
+    transform: translateY(-1px);
+  }
+
+  &.uploading {
+    opacity: 0.8;
+  }
+}
+
+.upload-icon {
+  flex-shrink: 0;
+  font-size: 28px;
+  color: var(--color-primary);
+}
+
+.upload-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.upload-title {
+  font-size: 14px;
+  font-weight: var(--fw-semi);
+  color: var(--text-primary);
+}
+
+.upload-subtitle {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.upload-btn {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: var(--fw-semi);
+  cursor: pointer;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
+  }
+}
+
+.file-input {
+  display: none;
+}
+
+.local-upload.disabled {
+  opacity: 0.65;
+  border-style: solid;
+}
+
+.upload-message {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+
+  &.error {
+    color: #e74c3c;
+  }
 }
 
 .search-input-wrap {
@@ -420,6 +638,11 @@ onMounted(() => {
 .badge-youtube {
   background: var(--brand-youtube-12);
   color: var(--brand-youtube);
+}
+
+.badge-local {
+  background: var(--color-primary-10);
+  color: var(--color-primary);
 }
 
 .fav-badge {

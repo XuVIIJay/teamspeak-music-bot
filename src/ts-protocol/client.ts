@@ -8,6 +8,7 @@ import {
   listChannels,
   listClients,
   clientMove,
+  getClientInfo,
   fileTransferDeleteFile,
   type Identity,
   type TextMessage,
@@ -61,6 +62,24 @@ export interface TS3TextMessage {
   invokerUid: string;
   message: string;
   targetMode: number; // 1=private, 2=channel, 3=server
+  invokerGroups: string[]; // sender's TS server-group ids; [] when not in view cache
+}
+
+/**
+ * Map the library's TextMessage to our wrapper. Preserves invokerGroups (the
+ * sender's TS server groups), which the library populates only when the sender
+ * is in the bot's client-view cache; otherwise it is []. Used by the chat
+ * command permission gate.
+ */
+export function toTS3TextMessage(msg: TextMessage): TS3TextMessage {
+  return {
+    invokerName: msg.invokerName,
+    invokerId: String(msg.invokerID),
+    invokerUid: msg.invokerUID,
+    message: msg.message,
+    targetMode: msg.targetMode,
+    invokerGroups: msg.invokerGroups ?? [],
+  };
 }
 
 export class TS3Client extends EventEmitter {
@@ -203,14 +222,7 @@ export class TS3Client extends EventEmitter {
     });
 
     this.client.on("textMessage", (msg: TextMessage) => {
-      const tsMsg: TS3TextMessage = {
-        invokerName: msg.invokerName,
-        invokerId: String(msg.invokerID),
-        invokerUid: msg.invokerUID,
-        message: msg.message,
-        targetMode: msg.targetMode,
-      };
-      this.emit("textMessage", tsMsg);
+      this.emit("textMessage", toTS3TextMessage(msg));
     });
 
     this.client.on("disconnected", (err) => {
@@ -317,6 +329,26 @@ export class TS3Client extends EventEmitter {
       const allClients = await listClients(this.client);
       const myChannelId = this.client.channelID();
       return allClients.filter((c) => c.channelID === myChannelId);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Resolve a client's CURRENT server groups by client id, server-wide (works
+   * regardless of channel/view) via a targeted `clientinfo` query. The raw
+   * `client_servergroups` field is a comma-separated list (same field
+   * `listClients` parses). Returns [] if the client can't be resolved or the
+   * query fails, so callers fail closed.
+   */
+  async getClientServerGroups(clid: number): Promise<string[]> {
+    if (!this.client) return [];
+    try {
+      const info = await getClientInfo(this.client, clid);
+      // `client_servergroups`: comma-separated server-group ids (verified in
+      // @honeybbq/teamspeak-client dist/index.mjs; listClients parses the same).
+      const raw = info.client_servergroups ?? "";
+      return raw ? raw.split(",") : [];
     } catch {
       return [];
     }

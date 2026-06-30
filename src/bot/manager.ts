@@ -74,6 +74,7 @@ export class BotManager extends EventEmitter {
   private qqProvider: MusicProvider;
   private bilibiliProvider: MusicProvider;
   private youtubeProvider: MusicProvider;
+  private localProvider: MusicProvider;
   private database: BotDatabase;
   private config: BotConfig;
   private logger: Logger;
@@ -90,13 +91,21 @@ export class BotManager extends EventEmitter {
     logger: Logger,
     avatarStore: AvatarStore,
     permissions: PermissionStore,
-    configPath: string
+    configPath: string,
+    localProvider?: MusicProvider
   ) {
     super();
     this.neteaseProvider = neteaseProvider;
     this.qqProvider = qqProvider;
     this.bilibiliProvider = bilibiliProvider;
     this.youtubeProvider = new YouTubeProvider();
+    this.localProvider = localProvider ?? neteaseProvider;
+    // Let the local provider see which uploads are still referenced by any
+    // bot's queue, so it never deletes a file another queue/bot still needs.
+    const referenceable = this.localProvider as Partial<{
+      setInUseResolver: (resolver: () => Set<string>) => void;
+    }>;
+    referenceable.setInUseResolver?.(() => this.getReferencedLocalSongIds());
     this.database = database;
     this.config = config;
     this.logger = logger;
@@ -127,6 +136,7 @@ export class BotManager extends EventEmitter {
       qqProvider: this.qqProvider,
       bilibiliProvider: this.bilibiliProvider,
       youtubeProvider: this.youtubeProvider,
+      localProvider: this.localProvider,
       database: this.database,
       config: this.config,
       logger: this.logger,
@@ -210,6 +220,18 @@ export class BotManager extends EventEmitter {
     return Array.from(this.bots.values());
   }
 
+  /** Local upload ids still referenced by any bot's queue. The local provider
+   *  uses this to avoid deleting a file another queue/bot is still using. */
+  getReferencedLocalSongIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const bot of this.bots.values()) {
+      for (const song of bot.getQueueManager().list()) {
+        if (song.platform === "local") ids.add(song.id);
+      }
+    }
+    return ids;
+  }
+
   async startBot(id: string): Promise<void> {
     const oldBot = this.bots.get(id);
     if (!oldBot) throw new Error(`Bot ${id} not found`);
@@ -253,6 +275,7 @@ export class BotManager extends EventEmitter {
         qqProvider: this.qqProvider,
         bilibiliProvider: this.bilibiliProvider,
         youtubeProvider: this.youtubeProvider,
+        localProvider: this.localProvider,
         database: this.database,
         config: this.config,
         logger: this.logger,
@@ -305,6 +328,7 @@ export class BotManager extends EventEmitter {
         qqProvider: this.qqProvider,
         bilibiliProvider: this.bilibiliProvider,
         youtubeProvider: this.youtubeProvider,
+        localProvider: this.localProvider,
         database: this.database,
         config: this.config,
         logger: this.logger,
