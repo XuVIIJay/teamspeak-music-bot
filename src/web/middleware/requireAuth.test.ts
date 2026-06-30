@@ -36,6 +36,7 @@ describe("requireAuth middleware", () => {
           transport: true,
           removeClear: true,
           playMode: true,
+          playCollection: true,
         },
       }))
     );
@@ -100,7 +101,7 @@ describe("requireAuth middleware", () => {
   it("attaches guest permissions when guest mode is enabled", () => {
     const sessions: any = { validateAndTouch: () => ({ userId: "__guest__", username: "游客", role: "guest" }) };
     const permissions: any = { getCapabilities: () => [], getBotAccess: () => [] };
-    const perms = { addToQueue: true, playNext: false, playNow: false, skip: false, transport: false, removeClear: false, playMode: false };
+    const perms = { addToQueue: true, playNext: false, playNow: false, skip: false, transport: false, removeClear: false, playMode: false, playCollection: false };
     const getGuestConfig = () => ({ enabled: true, bots: ["bot1"], permissions: perms });
     const mw = createRequireAuth(sessions, permissions, getGuestConfig);
     const req: any = { headers: { cookie: "tsmb_session=x" }, secure: false };

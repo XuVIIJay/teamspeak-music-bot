@@ -5,11 +5,21 @@ export interface Song {
   album: string;
   duration: number; // seconds
   coverUrl: string;
-  platform: "netease" | "qq" | "bilibili" | "youtube";
+  platform: "netease" | "qq" | "bilibili" | "youtube" | "local";
+  /** VIP / copyright-restricted: non-VIP users can only play a trial fragment
+   *  (NetEase fee=1 VIP / fee=4 album-only, or QQ pay.payplay/paytrackprice=1). */
+  vip?: boolean;
 }
 
 export interface SongWithUrl extends Song {
   url: string;
+}
+
+/** getSongUrl 解析结果。trialDuration 缺省 = 完整可播放（VIP 账号 / 免费曲）。 */
+export interface SongUrlResult {
+  url: string;
+  /** 试听片段时长（秒）。VIP/免费曲为 undefined → 调用方回退完整 duration。 */
+  trialDuration?: number;
 }
 
 export interface Playlist {
@@ -17,7 +27,7 @@ export interface Playlist {
   name: string;
   coverUrl: string;
   songCount: number;
-  platform: "netease" | "qq" | "bilibili" | "youtube";
+  platform: "netease" | "qq" | "bilibili" | "youtube" | "local";
 }
 
 export interface PlaylistDetail {
@@ -34,7 +44,7 @@ export interface Album {
   artist: string;
   coverUrl: string;
   songCount: number;
-  platform: "netease" | "qq" | "bilibili" | "youtube";
+  platform: "netease" | "qq" | "bilibili" | "youtube" | "local";
 }
 
 export interface LyricLine {
@@ -62,10 +72,10 @@ export interface AuthStatus {
 }
 
 export interface MusicProvider {
-  readonly platform: "netease" | "qq" | "bilibili" | "youtube";
+  readonly platform: "netease" | "qq" | "bilibili" | "youtube" | "local";
 
   search(query: string, limit?: number): Promise<SearchResult>;
-  getSongUrl(songId: string, quality?: string): Promise<string | null>;
+  getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null>;
   setQuality(quality: string): void;
   getQuality(): string;
   getSongDetail(songId: string): Promise<Song | null>;
