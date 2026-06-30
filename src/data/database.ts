@@ -43,6 +43,7 @@ export interface ProfileConfig {
   awayStatusEnabled: boolean;
   channelDescEnabled: boolean;
   nowPlayingMsgEnabled: boolean;
+  welcomeEnabled: boolean;
 }
 
 export const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
@@ -52,6 +53,7 @@ export const DEFAULT_PROFILE_CONFIG: ProfileConfig = {
   awayStatusEnabled: true,
   channelDescEnabled: true,
   nowPlayingMsgEnabled: true,
+  welcomeEnabled: true,
 };
 
 export interface FavoritePlaylist {
@@ -109,6 +111,7 @@ function migrateSchema(db: Database.Database): void {
     "profile_away_enabled",
     "profile_channel_desc_enabled",
     "profile_now_playing_enabled",
+    "profile_welcome_enabled",
   ];
   for (const col of profileCols) {
     if (!names.includes(col)) {
@@ -298,7 +301,8 @@ export function createDatabase(dbPath: string): BotDatabase {
   const selectProfileConfig = db.prepare(`
     SELECT profile_avatar_enabled, profile_description_enabled,
            profile_nickname_enabled, profile_away_enabled,
-           profile_channel_desc_enabled, profile_now_playing_enabled
+           profile_channel_desc_enabled, profile_now_playing_enabled,
+           profile_welcome_enabled
     FROM bot_instances WHERE id = ?
   `);
 
@@ -309,7 +313,8 @@ export function createDatabase(dbPath: string): BotDatabase {
       profile_nickname_enabled = @nickname,
       profile_away_enabled = @away,
       profile_channel_desc_enabled = @channelDesc,
-      profile_now_playing_enabled = @nowPlaying
+      profile_now_playing_enabled = @nowPlaying,
+      profile_welcome_enabled = @welcome
     WHERE id = @id
   `);
 
@@ -383,6 +388,7 @@ export function createDatabase(dbPath: string): BotDatabase {
         awayStatusEnabled: row.profile_away_enabled === 1,
         channelDescEnabled: row.profile_channel_desc_enabled === 1,
         nowPlayingMsgEnabled: row.profile_now_playing_enabled === 1,
+        welcomeEnabled: row.profile_welcome_enabled === 1,
       };
     },
 
@@ -395,6 +401,7 @@ export function createDatabase(dbPath: string): BotDatabase {
         away: config.awayStatusEnabled ? 1 : 0,
         channelDesc: config.channelDescEnabled ? 1 : 0,
         nowPlaying: config.nowPlayingMsgEnabled ? 1 : 0,
+        welcome: config.welcomeEnabled ? 1 : 0,
       });
     },
 

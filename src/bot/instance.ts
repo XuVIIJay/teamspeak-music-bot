@@ -1,8 +1,11 @@
 import { EventEmitter } from "node:events";
 import {
   TS3Client,
+  escapeTS3,
   type TS3ClientOptions,
   type TS3TextMessage,
+  type ClientInfo,
+  type ClientMovedEvent,
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
@@ -82,6 +85,9 @@ export class BotInstance extends EventEmitter {
   private autoPaused = false;
   private profileManager: BotProfileManager;
   private isFmMode = false;
+  private suppressWelcomeUntil = 0;
+  private defaultChannelName: string;
+  private defaultChannelId: bigint = 0n;
   private fmProvider: MusicProvider | null = null;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
@@ -106,6 +112,7 @@ export class BotInstance extends EventEmitter {
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
     this.queue = new PlayQueue();
+    this.defaultChannelName = options.tsOptions.defaultChannel ?? "";
 
     const profileConfig = this.database.getProfileConfig(this.id);
     this.profileManager = new BotProfileManager(
@@ -210,26 +217,209 @@ export class BotInstance extends EventEmitter {
       this.emit("disconnected");
     });
 
+    // 机器人切换频道后 3 秒内不发送欢迎
+    this.tsClient.on("channelChanged", () => {
+      this.suppressWelcomeUntil = Date.now() + 3000;
+    });
+
+    // connected 事件中缓存默认频道 ID
     this.tsClient.on("connected", () => {
       // Fresh connection — clear any stale auto-pause flag from a prior session.
       this.autoPaused = false;
       this._startIdlePoller();
+      this.tsClient.getDefaultChannelId().then((id) => {
+        this.defaultChannelId = id;
+      }).catch(() => {});
     });
 
-    // React near-instantly to channel membership changes. The 30s idle
-    // poller remains the fallback if any of these events are missed.
-    //
-    // clientEnter additionally arms auto-RESUME directly from the event,
-    // because the occupancy query (clientlist) times out whenever another
-    // client is present — i.e. exactly when a listener returns — so it cannot
-    // be used to confirm the return. See _resumeIfReturning().
+    // Welcome: clientEnter
+    this.tsClient.on("clientEnter", (info: ClientInfo) => {
+      this._handleClientEnter(info).catch((err) => {
+        this.logger.error({ err }, "Welcome error on clientEnter");
+      });
+    });
+
+    // Auto-pause: clientEnter (resume on return)
     this.tsClient.on("clientEnter", () => {
       this._resumeIfReturning();
       void this.refreshOccupancy();
     });
+
+    // Auto-pause: clientLeave
     this.tsClient.on("clientLeave", () => void this.refreshOccupancy());
+
+    // Welcome: clientMoved
+    this.tsClient.on("clientMoved", async (event: ClientMovedEvent) => {
+      await this._handleClientMoved(event);
+    });
+
+    // Auto-pause: clientMoved
     this.tsClient.on("clientMoved", () => void this.refreshOccupancy());
   }
+
+  // ─────────────────────────────────────────────
+  //  Welcome: clientEnter 处理
+  // ─────────────────────────────────────────────
+
+  private async _handleClientEnter(info: ClientInfo): Promise<void> {
+    this.logger.info({ nickname: info.nickname, clientId: info.id, channelID: info.channelID }, "clientEnter event");
+    if (info.id === this.tsClient.botClientId) {
+      this.logger.info({ nickname: info.nickname, clientId: info.id }, "clientEnter skipped (self)");
+      return;
+    }
+    if (Date.now() < this.suppressWelcomeUntil) {
+      this.logger.info({ nickname: info.nickname }, "clientEnter suppressed (cooldown)");
+      return;
+    }
+    if (!this.profileManager.getConfig().welcomeEnabled) {
+      this.logger.info("clientEnter skipped (welcome disabled)");
+      return;
+    }
+
+    const clients = await this.tsClient.getClientsInChannel();
+    const isInMyChannel = clients.some((c) => c.id === info.id);
+
+    if (!isInMyChannel) {
+      if (this.defaultChannelId === 0n) {
+        this.defaultChannelId = await this.tsClient.getDefaultChannelId();
+      }
+      if (this.defaultChannelId !== 0n) {
+        try {
+          const userInfo = await this.tsClient.findClientInfo(info.id);
+          if (userInfo && userInfo.channelID === this.defaultChannelId) {
+            this.logger.info({ nickname: info.nickname }, "clientEnter → server welcome (default channel)");
+            await this._sendServerWelcome(info.nickname);
+          }
+        } catch (err) {
+          this.logger.error({ err }, "clientEnter fallback error");
+        }
+      }
+      return;
+    }
+
+    const channelId = info.channelID !== 0n
+      ? info.channelID
+      : await this.tsClient.getMyChannelId();
+    this.logger.info({ nickname: info.nickname, channelId }, "clientEnter → channel welcome");
+    await this._sendChannelWelcome(info.nickname, channelId);
+
+    if (this.defaultChannelId === 0n) {
+      this.defaultChannelId = await this.tsClient.getDefaultChannelId();
+    }
+    if (this.defaultChannelId !== 0n && channelId === this.defaultChannelId) {
+      this.logger.info({ nickname: info.nickname }, "clientEnter → server welcome (bot in default channel)");
+      await this._sendServerWelcome(info.nickname);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Welcome: clientMoved 处理
+  // ─────────────────────────────────────────────
+
+  private async _handleClientMoved(
+    event: ClientMovedEvent
+  ): Promise<void> {
+    this.logger.info({ clientId: event.id, targetChannelID: event.targetChannelID }, "clientMoved event");
+    if (event.id === this.tsClient.botClientId) {
+      this.logger.info({ clientId: event.id }, "clientMoved skipped (self)");
+      return;
+    }
+    if (!this.profileManager.getConfig().welcomeEnabled) {
+      this.logger.info("clientMoved skipped (welcome disabled)");
+      return;
+    }
+    const myChannelId = await this.tsClient.getMyChannelId();
+    let enteredChannelId = event.targetChannelID;
+
+    if (enteredChannelId === 0n) {
+      const found = await this.tsClient.findClientInfo(event.id);
+      if (found) enteredChannelId = found.channelID;
+    }
+
+    let nickname: string | null = null;
+
+    const sameChannel = enteredChannelId !== 0n
+      ? enteredChannelId === myChannelId
+      : true;
+    if (sameChannel) {
+      const channelClients = await this.tsClient.getClientsInChannel();
+      const moved = channelClients.find((c) => c.id === event.id);
+      if (moved) nickname = moved.nickname;
+      if (!nickname) {
+        const info = await this.tsClient.findClientInfo(event.id);
+        if (info) nickname = info.nickname;
+      }
+    }
+
+    const isDefaultEnter = this.defaultChannelId !== 0n
+      && enteredChannelId === this.defaultChannelId;
+
+    if (isDefaultEnter && !nickname) {
+      const info = await this.tsClient.findClientInfo(event.id);
+      if (info) nickname = info.nickname;
+    }
+
+    if (!nickname) {
+      this.logger.info({ clientId: event.id }, "clientMoved no nickname, skip");
+      return;
+    }
+
+    if (sameChannel) {
+      this.logger.info({ nickname, channelId: myChannelId }, "clientMoved → channel welcome");
+      await this._sendChannelWelcome(nickname, myChannelId);
+    }
+
+    if (isDefaultEnter) {
+      this.logger.info({ nickname }, "clientMoved → server welcome");
+      await this._sendServerWelcome(nickname);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Welcome: 发送频道欢迎消息
+  // ─────────────────────────────────────────────
+
+  private async _sendChannelWelcome(
+    nickname: string, channelId: bigint
+  ): Promise<void> {
+    const channelName = await this.tsClient.getChannelName(channelId)
+      || this.defaultChannelName || "当前频道";
+
+    const msg = `🎵欢迎🎈${nickname}🎈加入${channelName}，🎶 !help 获取播放指令，玩的开心哦🍬`;
+    this.logger.info({ nickname, channelName, channelId }, "SEND channel welcome");
+
+    try {
+      await this.tsClient.execCommand(
+        `sendtextmessage targetmode=2 target=0 msg=${escapeTS3(msg)}`
+      );
+    } catch (err) {
+      this.logger.error({ err }, "Failed to send channel welcome");
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Welcome: 发送服务器欢迎消息
+  // ─────────────────────────────────────────────
+
+  private async _sendServerWelcome(nickname: string): Promise<void> {
+    try {
+      const serverName = await this.tsClient.getServerName();
+
+      const msg = `🎉欢迎🎈${nickname}🎈加入${serverName}！🎵使用💬!ai 与我对话聊天哦✨`
+        + `\n🔔  在下方选择频道聊天框互动吧  🔔`;
+      this.logger.info({ nickname, serverName }, "SEND server welcome");
+
+      await this.tsClient.execCommand(
+        `sendtextmessage targetmode=3 target=0 msg=${escapeTS3(msg)}`
+      );
+    } catch (err) {
+      this.logger.error({ err }, "Failed to send server welcome");
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  Auto-pause / resume
+  // ─────────────────────────────────────────────
 
   /**
    * Resume playback when a listener returns after an auto-pause, driven by the
