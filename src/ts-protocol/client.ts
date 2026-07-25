@@ -32,7 +32,7 @@ import {
 
 export { CODEC_OPUS_MUSIC } from "./voice.js";
 export type { ServerProtocol } from "./protocol-detect.js";
-export type { FileUploadInfo } from "@honeybbq/teamspeak-client";
+export type { FileUploadInfo, ClientInfo, ClientMovedEvent } from "@honeybbq/teamspeak-client";
 
 /** Escape a string for use in TS3 ServerQuery-style commands. */
 export function escapeTS3(str: string): string {
@@ -452,6 +452,17 @@ export class TS3Client extends EventEmitter {
     const channels = await listChannels(this.client);
     const ch = channels.find((c: any) => c.id === channelId);
     return ch?.name ?? null;
+  }
+
+  /** Look up the server's display name via serverinfo. */
+  async getServerName(): Promise<string> {
+    if (!this.client) return this.options.host;
+    try {
+      const result = await this.client.execCommandWithResponse("serverinfo");
+      return result[0]?.virtualserver_name || this.options.host;
+    } catch {
+      return this.options.host;
+    }
   }
 
   // --- Raw command & file transfer pass-through ---
