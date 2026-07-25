@@ -7,8 +7,8 @@ export async function askAI(prompt: string, apiKey: string, systemPrompt?: strin
     const res = await axios.post(
       "https://api.deepseek.com/v1/chat/completions",
       {
-        model: "deepseek-chat",
-        max_tokens: 200,
+        model: "deepseek-v4-flash",
+        max_tokens: 500,
         messages: [
           {
             role: "system",
@@ -27,7 +27,12 @@ export async function askAI(prompt: string, apiKey: string, systemPrompt?: strin
     const text = res.data?.choices?.[0]?.message?.content?.trim() || "无回复";
     return text.length > 200 ? text.slice(0, 200) + "..." : text;
   } catch (err) {
-    console.error("AI ERROR:", err);
+    if (axios.isAxiosError(err)) {
+      const detail = err.response?.data;
+      console.error("AI request failed:", detail ? JSON.stringify(detail).slice(0, 500) : err.message);
+    } else {
+      console.error("AI request failed:", err);
+    }
     return "AI请求失败";
   }
 }
