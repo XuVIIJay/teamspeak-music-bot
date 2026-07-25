@@ -1371,8 +1371,11 @@ export class BotInstance extends EventEmitter {
     if (error) return error;
     const song0 = song!;
     const ok = await this.playSingleSong(song0, requesterName);
-    if (!ok) return `Cannot play: ${song0.name}`;
-    return `Now playing: ${song0.name} - ${song0.artist}`;
+    if (!ok) {
+      const d = await this.getAuthDiag(song0.platform as "netease" | "qq");
+      return `无法播放: ${song0.name}\n${d.status}\n${d.hint}`;
+    }
+    return `Now playing: ${song0.name} - ${song0.artist}${await this.getTrialWarning(song0)}`;
   }
 
   /**
@@ -1474,9 +1477,13 @@ export class BotInstance extends EventEmitter {
     if (wasIdle) {
       this.queue.playAt(this.queue.size() - 1);
       this.player.resetFailures();
-      await this.resolveAndPlay(this.queue.current()!);
+      const ok = await this.resolveAndPlay(this.queue.current()!);
       this.emit("stateChange");
-      return `Now playing: ${s.name} - ${s.artist}`;
+      if (!ok) {
+        const d = await this.getAuthDiag(s.platform as "netease" | "qq");
+        return `无法播放: ${s.name}\n${d.status}\n${d.hint}`;
+      }
+      return `Now playing: ${s.name} - ${s.artist}${await this.getTrialWarning(s)}`;
     }
 
     this.emit("stateChange");
@@ -1506,7 +1513,10 @@ export class BotInstance extends EventEmitter {
       this.player.resetFailures();
       const ok = await this.resolveAndPlay(this.queue.current()!);
       this.emit("stateChange");
-      if (!ok) return `Cannot play: ${s.name}`;
+      if (!ok) {
+        const d = await this.getAuthDiag(s.platform as "netease" | "qq");
+        return `无法播放: ${s.name}\n${d.status}\n${d.hint}`;
+      }
       return `Now playing: ${s.name} - ${s.artist}`;
     }
 
@@ -1737,10 +1747,15 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    let ok = true;
+    if (first) ok = await this.resolveAndPlay(first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    if (!ok) {
+      const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
+      return `无法播放歌单: ${cmd.args}\n${d.status}\n${d.hint}`;
+    }
+    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdAlbum(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1774,10 +1789,15 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    let ok = true;
+    if (first) ok = await this.resolveAndPlay(first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}`;
+    if (!ok) {
+      const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
+      return `无法播放专辑: ${cmd.args}\n${d.status}\n${d.hint}`;
+    }
+    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdFm(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1810,11 +1830,16 @@ export class BotInstance extends EventEmitter {
     this.player.resetFailures();
 
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    let ok = true;
+    if (first) ok = await this.resolveAndPlay(first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
+    if (!ok) {
+      const d = await this.getAuthDiag("netease");
+      return `无法播放FM\n${d.status}\n${d.hint}`;
+    }
     const label = provider.platform === "qq" ? "QQ Radar FM" : "Personal FM";
-    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}`;
+    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdArtist(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -1844,10 +1869,15 @@ export class BotInstance extends EventEmitter {
     this.player.resetFailures();
 
     const first = this.queue.play();
-    if (first) await this.resolveAndPlay(first);
+    let ok = true;
+    if (first) ok = await this.resolveAndPlay(first);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}`;
+    if (!ok) {
+      const d = await this.getAuthDiag(provider.platform as "netease" | "qq");
+      return `无法播放: ${cmd.args}\n${d.status}\n${d.hint}`;
+    }
+    return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async refillFm(): Promise<void> {
@@ -1903,6 +1933,81 @@ export class BotInstance extends EventEmitter {
     if (!cmd.args) return "Usage: !move <channel name or ID>";
     await this.tsClient.joinChannel(cmd.args);
     return `Moved to channel: ${cmd.args}`;
+  }
+
+  // 查询平台登录/VIP 状态，返回诊断文字和针对性提示
+  private async getAuthDiag(targetPlatform?: "netease" | "qq"): Promise<{ status: string; hint: string }> {
+    const parts: string[] = [];
+    // 网易云
+    const ne = await this.neteaseProvider.getAuthStatus().catch(() => null);
+    let neVip = false;
+    if (ne?.loggedIn) {
+      let vip = "";
+      try {
+        const accRes = await (this.neteaseProvider as any).api.get("/user/account", {
+          params: { cookie: this.neteaseProvider.getCookie() },
+        });
+        const ad = accRes.data?.data ?? accRes.data;
+        const vt: number = ad?.profile?.vipType ?? 0;
+        neVip = vt === 11 || vt === 110 || vt === 10;
+        vip = vt === 11 || vt === 110 ? "(黑胶VIP)"
+          : vt === 10 ? "(音乐包)"
+          : "(无VIP)";
+      } catch { vip = ""; }
+      parts.push(`网易云：已登录(${ne.nickname})${vip}`);
+    } else {
+      parts.push("网易云：未登录");
+    }
+    // QQ
+    const qq = await this.qqProvider.getAuthStatus().catch(() => null);
+    const qqLoggedIn = qq?.loggedIn ?? false;
+    parts.push(qqLoggedIn
+      ? `QQ音乐：已登录(${qq!.nickname})`
+      : "QQ音乐：未登录");
+
+    // 根据目标平台生成针对性提示
+    let hint: string;
+    if (targetPlatform === "qq") {
+      if (!qqLoggedIn) {
+        hint = "QQ音乐未登录，请在WebUI设置页扫码登录QQ音乐";
+      } else {
+        hint = "QQ音乐已登录但无法播放，请检查是否开通绿钻或Hollywood VIP";
+      }
+    } else if (targetPlatform === "netease") {
+      if (!ne?.loggedIn) {
+        hint = "网易云未登录，请在WebUI设置页扫码登录网易云";
+      } else if (!neVip) {
+        hint = "网易云已登录但无VIP，可能无法播放VIP歌曲，请检查是否开通黑胶VIP";
+      } else {
+        hint = "网易云已登录且有VIP，请检查网络或歌曲版权状态";
+      }
+    } else {
+      hint = "请在WebUI设置页检查音乐平台登录状态及VIP是否有效";
+    }
+    return { status: parts.join("，"), hint };
+  }
+
+  private async getTrialWarning(song: { fee?: number; platform: string }): Promise<string> {
+    if (song.platform !== "netease" || song.fee !== 1) return "";
+    this.logger.info({ songId: (song as any).id, songName: (song as any).name, fee: song.fee }, "VIP song trial detected");
+    const auth = await this.neteaseProvider.getAuthStatus().catch(() => ({ loggedIn: false }));
+    if (!auth.loggedIn) return "\n⚠️ 试听中，完整版请在WebUI登录网易云";
+    let hasVip = false;
+    try {
+      const accRes = await (this.neteaseProvider as any).api.get("/user/account", {
+        params: { cookie: this.neteaseProvider.getCookie() },
+      });
+      const vt: number = accRes.data?.data?.profile?.vipType ?? accRes.data?.profile?.vipType ?? 0;
+      hasVip = vt === 11 || vt === 110 || vt === 10;
+    } catch { /* ignore */ }
+    if (!hasVip) return "\n⚠️ 试听中，完整版请开通黑胶VIP";
+    return "";
+  }
+
+  private async checkTrialWarning(): Promise<string> {
+    const song = this.queue.current();
+    if (!song) return "";
+    return this.getTrialWarning(song);
   }
 
   private async cmdFollow(msg?: TS3TextMessage): Promise<string> {
