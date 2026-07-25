@@ -465,6 +465,7 @@ export class BotInstance extends EventEmitter {
     this.tsClient.on("clientLeave", (event: { id: number }) => {
       this.voiceDucking.removeSpeaker(event.id);
       void this.refreshOccupancy();
+    });
 
     // 监听 clientEnter（用户进入 → 欢迎消息）
     this.tsClient.on("clientEnter", (info: ClientInfo) => {
