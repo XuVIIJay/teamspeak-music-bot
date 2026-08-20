@@ -32,7 +32,7 @@ import {
 
 export { CODEC_OPUS_MUSIC } from "./voice.js";
 export type { ServerProtocol } from "./protocol-detect.js";
-export type { FileUploadInfo } from "@honeybbq/teamspeak-client";
+export type { FileUploadInfo, ClientInfo, ClientMovedEvent } from "@honeybbq/teamspeak-client";
 
 /** Escape a string for use in TS3 ServerQuery-style commands. */
 export function escapeTS3(str: string): string {
@@ -112,6 +112,7 @@ export class TS3Client extends EventEmitter {
     number,
     ReturnType<typeof setTimeout>
   >();
+  get botClientId(): number { return this.clientId; }
   private logger: Logger;
   private disconnecting = false;
   private detectedProtocol: ServerProtocol = "unknown";
@@ -352,6 +353,7 @@ export class TS3Client extends EventEmitter {
       }
 
       await clientMove(this.client, this.clientId, channel.id, password);
+      this.emit("channelChanged");
       this.logger.info(
         { channelName, cid: channel.id.toString() },
         "Joined channel"
@@ -399,6 +401,67 @@ export class TS3Client extends EventEmitter {
       return raw ? raw.split(",") : [];
     } catch {
       return [];
+    }
+  }
+
+  /** Get the server's default channel ID via raw ServerQuery. */
+  async getDefaultChannelId(): Promise<bigint> {
+    try {
+      const info = await this.client!.execCommandWithResponse("serverinfo");
+      const rawId = info[0]?.virtualserver_default_channel_id;
+      if (rawId != null) return BigInt(rawId);
+    } catch { /* fall through */ }
+    try {
+      const result = await this.execCommandWithResponse("channellist -flags");
+      const entry = result.find((ch: any) => ch.channel_flag_default === "1");
+      return entry ? BigInt(entry.cid ?? 0) : 0n;
+    } catch {
+      return 0n;
+    }
+  }
+
+  /** Discover the bot's actual channel ID by looking up its own record. */
+  async getMyChannelId(): Promise<bigint> {
+    if (!this.client) return 0n;
+    const id = this.client.channelID();
+    if (id !== 0n) return id;
+    try {
+      const allClients = await listClients(this.client);
+      return allClients.find((c) => c.id === this.clientId)?.channelID ?? 0n;
+    } catch {
+      return 0n;
+    }
+  }
+
+  /** Look up a client's nickname and channelID by its client ID. */
+  async findClientInfo(clientId: number):
+    Promise<{ nickname: string; channelID: bigint } | null> {
+    if (!this.client) return null;
+    try {
+      const allClients = await listClients(this.client);
+      const c = allClients.find((cl) => cl.id === clientId);
+      return c ? { nickname: c.nickname, channelID: c.channelID } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Look up a channel name by its numeric ID. */
+  async getChannelName(channelId: bigint): Promise<string | null> {
+    if (!this.client) return null;
+    const channels = await listChannels(this.client);
+    const ch = channels.find((c: any) => c.id === channelId);
+    return ch?.name ?? null;
+  }
+
+  /** Look up the server's display name via serverinfo. */
+  async getServerName(): Promise<string> {
+    if (!this.client) return this.options.host;
+    try {
+      const result = await this.client.execCommandWithResponse("serverinfo");
+      return result[0]?.virtualserver_name || this.options.host;
+    } catch {
+      return this.options.host;
     }
   }
 
