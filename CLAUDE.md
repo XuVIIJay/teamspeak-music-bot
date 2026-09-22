@@ -19,7 +19,8 @@ remote：
 - `upstream` = 作者仓库（HTTPS）。若本地不存在：
   `git remote add upstream https://github.com/ZHANGTIANYAO1/teamspeak-music-bot.git`
 
-本文件在 `Complete` 分支维护；`main` 上不存在（main 必须与上游一致）。
+本文件和 `.gitattributes` 在三个 `feat/*` 分支与 `Complete` 上维护（内容相同）；
+`main` 上不存在，因为 main 必须与上游逐字一致。
 
 ## README 保护机制
 
