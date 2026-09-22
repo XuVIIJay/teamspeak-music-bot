@@ -50,7 +50,7 @@ git config merge.keepours.driver true
 git fetch upstream main
 
 # 1) main 对齐上游（README 一并更新）
-git switch main
+git switch main                            # 首次需 git switch -c main origin/main，见文末说明
 git merge --ff-only upstream/main          # fork/main 从不领先上游，必定成功
 
 # 2) 三个功能分支吸收上游（各自的 README 自动保留）
@@ -67,8 +67,18 @@ git push origin main Complete \
   feat/ai-chat feat/welcome feat/playback-error-diagnostic
 ```
 
-首次操作时本地可能只有 `Complete`，其余分支需从 origin 建立跟踪：
-`git switch feat/ai-chat`（会自动跟踪 `origin/feat/ai-chat`）。
+首次操作时本地可能只有 `Complete`，其余分支需从 origin 建立跟踪。
+**注意 `main` 在 `origin` 和 `upstream` 下同名**，直接 `git switch main` 会以
+"匹配多个（2 个）远程跟踪分支"失败，必须用显式形式：
+
+```bash
+git switch -c main origin/main
+git switch -c feat/ai-chat origin/feat/ai-chat
+git switch -c feat/welcome origin/feat/welcome
+git switch -c feat/playback-error-diagnostic origin/feat/playback-error-diagnostic
+```
+
+本地分支建好之后，`git switch main` / `git switch feat/xxx` 就不再有歧义。
 
 ## 陷阱
 
