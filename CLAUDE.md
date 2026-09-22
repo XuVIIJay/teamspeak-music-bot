@@ -82,20 +82,66 @@ git switch -c feat/playback-error-diagnostic origin/feat/playback-error-diagnost
 
 ## 陷阱
 
-### package-lock.json 冲突绝不能手工解决
+### package-lock.json 绝不能手工编辑；merge 之后必须校验
 
-解决 `package.json` 后重新生成：
+**git 对 lock 的行级三方合并不可靠**：即使 merge 没有报冲突，也可能产出一个与
+`package.json` 不一致的 lock。真实案例：`feat/ai-chat` merge `main` 之后，lock 仍是
+`b357450` 破坏过的 492 条版本（另两个 feature 分支和 main 是 507 条），`npm ci` 直接失败。
+
+所以**每次更新上游（上面流程的第 2、3 步）之后都要校验一遍**，不要等冲突出现：
 
 ```bash
-git checkout --theirs package-lock.json   # 或 --ours，任取一边
-npm install                                # 让 npm 重算出一份一致的
-git add package-lock.json
+for b in main feat/ai-chat feat/welcome feat/playback-error-diagnostic Complete; do
+  d=$(mktemp -d)
+  git show "$b:package.json"      > "$d/package.json"
+  git show "$b:package-lock.json" > "$d/package-lock.json"
+  (cd "$d" && npm ci --dry-run >/dev/null 2>&1) \
+    && echo "$b ✓" || echo "$b ✗ lock 与 package.json 不一致"
+  rm -rf "$d"
+done
 ```
+
+（`npm ci --dry-run` 几秒出结果，且不碰 `node_modules`。）
+
+发现不一致时**不要手工编辑 lock**。`package.json` 相同的分支应共用同一份 lock：
+
+```bash
+git checkout <已验证正确的分支> -- package-lock.json
+npm ci --dry-run                  # 复核
+git commit -m "chore(deps): sync package-lock.json with package.json"
+```
+
+没有可复用的正确版本时，才重新生成（只重算 lock，不动 `node_modules`）：
+
+```bash
+npm install --package-lock-only
+```
+
+**各分支 lock 的预期条目数**（截至 2026-09-22）。`package.json` 相同的分支，
+lock 应完全相同：
+
+| 分支 | package.json | lock 条目数 |
+|---|---|---|
+| `main` / `feat/welcome` / `feat/playback-error-diagnostic` | 无 `dotenv` | 507 |
+| `feat/ai-chat` / `Complete` | 含 `dotenv` | 510 |
 
 历史教训：commit `b357450`（引入 AI 功能时）把 lock 重写成基于旧分叉点的版本，
 丢掉 `bcryptjs` / `cookie-parser` / `supertest` 等条目，且多个包版本低于 `package.json` 的 range。
-后果是 `Dockerfile` 里的 `npm ci` 直接以 EUSAGE 失败，直到 `52446ba` 才修复。
+后果是 `Dockerfile` 里的 `npm ci` 以 EUSAGE 失败，直到 `52446ba` 修好 `Complete`，
+但 `feat/ai-chat` 自己那份漏了，又过一轮才补上。
 **lock 变更要和功能变更分开提交**，混在一起时极难排查。
+
+### docker 相关文件（刻意保留，不要删）
+
+`.dockerignore`、`.github/workflows/docker-publish.yml`、`scripts/docker/` 继承自上游，
+与安装脚本（`scripts/setup.sh` / `setup.bat` / `install.sh`）**零耦合**——安装脚本用
+`npm install`，完全不碰 docker。
+
+刻意保留而不是删掉：`main` 必须与上游逐字一致；且上游会修改 `Dockerfile`
+（#152 就把 `node:20` 改成了 `node:22`），fork 里删掉它会让每次 merge 报
+`modify/delete` 冲突。`docker-publish.yml` 只在推 `v*.*.*` tag 时触发，其
+`IMAGE_NAME` 指向作者的 GHCR 命名空间 —— fork 里打 tag 会因无权限而失败，
+不发镜像就不用管。
 
 ### Node 版本
 
