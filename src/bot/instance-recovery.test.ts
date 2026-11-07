@@ -35,6 +35,7 @@ function makeBot() {
   const tsClient = new EventEmitter() as any;
   tsClient.getClientsInChannel = vi.fn(async () => [{ id: 1 }, { id: 2 }]);
   tsClient.getClientId = () => 1;
+  tsClient.getDefaultChannelId = vi.fn(async () => 0n);
   tsClient.sendVoiceData = vi.fn();
   tsClient.connect = vi.fn(async () => { tsClient.emit("connected"); });
   tsClient.disconnect = vi.fn(() => { tsClient.emit("disconnected"); });
@@ -50,7 +51,7 @@ function makeBot() {
     localProvider: {}, voiceDucking: { reset: vi.fn(), removeSpeaker: vi.fn() },
     managedVoiceClients: new ManagedVoiceClientRegistry(),
     configuredVoiceServerScope: { host: "localhost", voicePort: 9987 },
-    profileManager: { onConnect: vi.fn(), onChannelMoved: vi.fn(async () => {}) },
+    profileManager: { onConnect: vi.fn(), onChannelMoved: vi.fn(async () => {}), getConfig: () => ({ welcomeEnabled: false }) },
     unregisterManagedVoiceClient: vi.fn(), registerManagedVoiceClient: vi.fn(),
     restoreQueueFromSnapshot: vi.fn(async () => {}), _startJellyfinReportPoller: vi.fn(),
     logger: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() },
