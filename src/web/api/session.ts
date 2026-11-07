@@ -3,6 +3,7 @@ import type { Request, Response, NextFunction } from "express";
 import type { Logger } from "../../logger.js";
 import type { UserStore } from "../../data/users.js";
 import type { SessionStore } from "../../data/sessions.js";
+import type { ApiKeyStore } from "../../data/api-keys.js";
 import type { AuditStore } from "../../data/audit.js";
 import { resolvePermissionContext, type PermissionStore } from "../../data/permissions.js";
 import { SESSION_TTL_MS, GUEST_SESSION_TTL_MS } from "../../data/sessions.js";
@@ -54,7 +55,8 @@ export function createSessionRouter(
   audit: AuditStore,
   logger: Logger,
   permissions: PermissionStore,
-  getGuestConfig: () => GuestModeConfig
+  getGuestConfig: () => GuestModeConfig,
+  apiKeys?: ApiKeyStore
 ): Router {
   const router = Router();
 
@@ -180,7 +182,25 @@ export function createSessionRouter(
       capabilities: [...ctx.capabilities],
       bots: ctx.bots === "all" ? "all" : [...ctx.bots],
       guest: ctx.guest ?? null,
+      accentColor: user.role === "guest" ? null : users.getAccentColor(user.id),
     });
+  });
+
+  router.put("/preferences", requireAuthInline, (req, res) => {
+    if (req.user!.role === "guest") {
+      res.status(403).json({ error: "guests store appearance preferences locally" });
+      return;
+    }
+    const color = req.body?.accentColor;
+    if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) {
+      res.status(400).json({ error: "invalid accent color" });
+      return;
+    }
+    if (!users.setAccentColor(req.user!.id, color.toLowerCase())) {
+      res.status(404).json({ error: "user not found" });
+      return;
+    }
+    res.json({ accentColor: color.toLowerCase() });
   });
 
   router.post("/change-password", requireAuthInline, async (req, res) => {
@@ -202,6 +222,7 @@ export function createSessionRouter(
     await users.changePassword(u.id, newPassword);
     const currentToken = parseTokenFromCookie(req.headers.cookie);
     sessions.deleteAllForUser(u.id, currentToken ?? undefined);
+    apiKeys?.deleteAllForUser(u.id);
     try {
       audit.record({
         actorId: u.id, actorUsername: u.username,

@@ -6,6 +6,7 @@ import pino from "pino";
 import { createDatabase, type BotDatabase } from "../../data/database.js";
 import { createUserStore, type UserStore } from "../../data/users.js";
 import { createSessionStore, type SessionStore } from "../../data/sessions.js";
+import { createApiKeyStore, type ApiKeyStore } from "../../data/api-keys.js";
 import { createAuditStore } from "../../data/audit.js";
 import { createPermissionStore } from "../../data/permissions.js";
 import { getDefaultConfig, type GuestModeConfig } from "../../data/config.js";
@@ -13,7 +14,7 @@ import type { GuestPermissions, BotAccess } from "../../data/permissions.js";
 import { createSessionRouter } from "./session.js";
 import { SESSION_COOKIE_NAME } from "../auth/validateSession.js";
 
-function makeApp(botDb: BotDatabase, users: UserStore, sessions: SessionStore) {
+function makeApp(botDb: BotDatabase, users: UserStore, sessions: SessionStore, apiKeys?: ApiKeyStore) {
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
@@ -27,7 +28,8 @@ function makeApp(botDb: BotDatabase, users: UserStore, sessions: SessionStore) {
       audit,
       pino({ level: "silent" }),
       permissions,
-      () => getDefaultConfig().guestMode
+      () => getDefaultConfig().guestMode,
+      apiKeys
     )
   );
   return app;
@@ -125,6 +127,29 @@ describe("session router", () => {
     expect(anon.status).toBe(401);
   });
 
+  it("stores accent preferences per account and returns them to other sessions", async () => {
+    const alice = await users.createUser("alice", "pw-alice", "member");
+    const bob = await users.createUser("bob", "pw-bob", "member");
+    const cookieA = `${SESSION_COOKIE_NAME}=${sessions.createSession(alice.id).token}`;
+    const cookieB = `${SESSION_COOKIE_NAME}=${sessions.createSession(alice.id).token}`;
+    const updated = await request(app).put('/api/session/preferences').set('Cookie', cookieA)
+      .send({ accentColor: '#8B5CF6', userId: bob.id });
+    expect(updated.status).toBe(200);
+    expect(updated.body.accentColor).toBe('#8b5cf6');
+    expect((await request(app).get('/api/session/me').set('Cookie', cookieB)).body.accentColor).toBe('#8b5cf6');
+    expect(users.getAccentColor(bob.id)).toBe('#335eea');
+  });
+
+  it("rejects anonymous and invalid preference updates without altering the account", async () => {
+    const alice = await users.createUser("alice", "pw-alice", "member");
+    const cookie = `${SESSION_COOKIE_NAME}=${sessions.createSession(alice.id).token}`;
+    expect((await request(app).put('/api/session/preferences').send({ accentColor: '#8b5cf6' })).status).toBe(401);
+    for (const accentColor of ['red', '#fff', '#zzzzzz', null, 123]) {
+      expect((await request(app).put('/api/session/preferences').set('Cookie', cookie).send({ accentColor })).status).toBe(400);
+    }
+    expect(users.getAccentColor(alice.id)).toBe('#335eea');
+  });
+
   it("POST /logout deletes the session and clears the cookie", async () => {
     await users.createUser("alice", "pw-alice", "admin");
     const loginRes = await request(app)
@@ -174,6 +199,68 @@ describe("session router", () => {
     // CPU, which made it look like a real intermittent failure. The work is
     // genuinely slow, not hung, so the timeout is what was wrong.
   }, 20000);
+});
+
+describe("session router — API key revocation", () => {
+  let botDb: BotDatabase;
+  let users: UserStore;
+  let sessions: SessionStore;
+  let apiKeys: ApiKeyStore;
+  let app: express.Express;
+  let userId: string;
+  let currentCookie: string;
+  let rawKey: string;
+
+  beforeEach(async () => {
+    botDb = createDatabase(":memory:");
+    users = createUserStore(botDb.db);
+    sessions = createSessionStore(botDb.db);
+    apiKeys = createApiKeyStore(botDb.db);
+    const member = await users.createUser("alice", "old-password", "member");
+    userId = member.id;
+    currentCookie = `${SESSION_COOKIE_NAME}=${sessions.createSession(userId).token}`;
+    rawKey = apiKeys.create(userId, "integration")!.rawKey;
+    app = makeApp(botDb, users, sessions, apiKeys);
+  });
+
+  afterEach(() => botDb.close());
+
+  it("successful password change revokes all owned keys and preserves only the active browser session", async () => {
+    const secondKey = apiKeys.create(userId, "another-integration")!.rawKey;
+    const otherSession = `${SESSION_COOKIE_NAME}=${sessions.createSession(userId).token}`;
+    const otherUser = await users.createUser("bob", "other-password", "member");
+    const otherUserKey = apiKeys.create(otherUser.id, "other-user-integration")!.rawKey;
+
+    const changed = await request(app).post("/api/session/change-password")
+      .set("Cookie", currentCookie)
+      .send({ oldPassword: "old-password", newPassword: "new-password" });
+    expect(changed.status).toBe(204);
+    expect(apiKeys.validateAndTouch(rawKey)).toBeNull();
+    expect(apiKeys.validateAndTouch(secondKey)).toBeNull();
+    expect(apiKeys.listForUser(userId)).toEqual([]);
+    expect(apiKeys.validateAndTouch(otherUserKey)?.userId).toBe(otherUser.id);
+    expect((await request(app).get("/api/session/me").set("Cookie", currentCookie)).status).toBe(200);
+    expect((await request(app).get("/api/session/me").set("Cookie", otherSession)).status).toBe(401);
+  }, 20_000);
+
+  it.each([
+    { oldPassword: "wrong-password", newPassword: "new-password", status: 401 },
+    { oldPassword: "old-password", newPassword: "short", status: 400 },
+  ])("failed password change ($status) leaves API keys valid", async ({ oldPassword, newPassword, status }) => {
+    const changed = await request(app).post("/api/session/change-password")
+      .set("Cookie", currentCookie)
+      .send({ oldPassword, newPassword });
+    expect(changed.status).toBe(status);
+    expect(apiKeys.validateAndTouch(rawKey)?.userId).toBe(userId);
+    expect((await request(app).get("/api/session/me").set("Cookie", currentCookie)).status).toBe(200);
+  });
+
+  it("unauthenticated password change leaves API keys valid", async () => {
+    const changed = await request(app).post("/api/session/change-password")
+      .send({ oldPassword: "old-password", newPassword: "new-password" });
+    expect(changed.status).toBe(401);
+    expect(apiKeys.validateAndTouch(rawKey)?.userId).toBe(userId);
+  });
 });
 
 describe("session router — guest mode", () => {
@@ -236,6 +323,8 @@ describe("session router — guest mode", () => {
     expect(me.body.guest.addToQueue).toBe(true);
     expect(me.body.guest.playNext).toBe(true);
     expect(me.body.capabilities).toEqual([]);
+    expect(me.body.accentColor).toBeNull();
+    expect((await request(app).put('/api/session/preferences').set('Cookie', cookie).send({ accentColor: '#8b5cf6' })).status).toBe(403);
   });
 
   it("GET /needs-setup exposes guestAllowed", async () => {

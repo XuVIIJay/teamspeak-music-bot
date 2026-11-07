@@ -1,5 +1,5 @@
 <template>
-  <div class="app" :data-theme="theme">
+  <div class="app" :data-theme="theme" :style="accentStyle">
     <Navbar />
     <main class="main-content">
       <RouterView />
@@ -7,6 +7,7 @@
     <Player />
     <Toast />
     <Queue class="mobile-queue" :open="mobileQueueOpen" @close="mobileQueueOpen = false" />
+    <BilibiliPartModal />
 
     <!-- Mobile mini player -->
     <div v-if="currentSong" class="m-player" @click="onPlayerRowClick">
@@ -81,7 +82,7 @@
         <Icon icon="mdi:music-box-multiple" class="tab-icon" />
         <span class="tab-label">音乐库</span>
       </RouterLink>
-      <RouterLink v-if="!session.isGuest.value" to="/settings" class="m-tab" :class="{ active: route.path.startsWith('/settings') }">
+      <RouterLink to="/settings" class="m-tab" :class="{ active: route.path.startsWith('/settings') }">
         <Icon icon="mdi:cog" class="tab-icon" />
         <span class="tab-label">设置</span>
       </RouterLink>
@@ -97,11 +98,13 @@ import { usePlayerStore } from './stores/player.js';
 import { useDecoupledSlider } from './composables/useDecoupledSlider.js';
 import { useWebSocket } from './composables/useWebSocket.js';
 import { useSession } from './composables/useSession.js';
+import { accentTokens } from './styles/accent.js';
 import Navbar from './components/Navbar.vue';
 import Player from './components/Player.vue';
 import CoverArt from './components/CoverArt.vue';
 import Toast from './components/Toast.vue';
 import Queue from './components/Queue.vue';
+import BilibiliPartModal from './components/BilibiliPartModal.vue';
 
 const playerStore = usePlayerStore();
 const session = useSession();
@@ -111,6 +114,10 @@ const canTransport = computed(() => can('player.control') || guestCan('transport
 const canSkip = computed(() => can('player.control') || guestCan('skip'));
 const canModeCtl = computed(() => can('player.control') || guestCan('playMode'));
 const theme = computed(() => playerStore.theme);
+const accentStyle = computed(() => accentTokens(playerStore.accentColor));
+watch(() => `${session.currentUser.value?.id ?? ''}:${session.currentUser.value?.accentColor ?? ''}`, () => {
+  playerStore.loadAccentColor(session.currentUser.value?.accentColor);
+}, { immediate: true });
 const route = useRoute();
 const router = useRouter();
 const { connect } = useWebSocket();
@@ -329,8 +336,9 @@ function cycleMobileMode() {
   playerStore.setMode(nextMode);
 }
 
+let stopThemeSync: (() => void) | undefined;
 onMounted(async () => {
-  playerStore.loadTheme();
+  stopThemeSync = playerStore.loadTheme();
   connect();
   // Hydrate favorites once per session so deep-links / hard refreshes onto
   // Search or Playlist render hearts correctly without first visiting Home.
@@ -353,6 +361,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  stopThemeSync?.();
   if (syncTimer) clearInterval(syncTimer);
   if (mobileRaf !== null) cancelAnimationFrame(mobileRaf);
 });

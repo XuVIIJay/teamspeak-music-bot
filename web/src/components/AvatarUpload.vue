@@ -87,7 +87,7 @@ function clear() {
   font-size: 12px;
   font-weight: 600;
   transition: all var(--transition-fast);
-  &:hover { background: var(--color-primary); color: white; }
+  &:hover { background: var(--color-primary); color: var(--color-on-primary); }
 }
 
 .btn-danger {
