@@ -104,7 +104,7 @@
         </div>
       </div>
 
-      <RouterLink v-if="!session.isGuest.value" to="/settings" class="settings-btn">
+      <RouterLink to="/settings" class="settings-btn" aria-label="设置" title="设置">
         <Icon icon="mdi:cog" />
       </RouterLink>
 
@@ -655,7 +655,7 @@ onUnmounted(() => {
 
   &.primary {
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-on-primary);
     border-color: var(--color-primary);
   }
 
@@ -665,9 +665,16 @@ onUnmounted(() => {
 }
 
 .settings-btn {
-  font-size: 22px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  font-size: 20px;
+  line-height: 1;
   opacity: 0.6;
   transition: opacity var(--transition-fast);
+  svg { display: block; width: 20px; height: 20px; }
   &:hover { opacity: 1; }
 
   @media (max-width: 768px) {
@@ -750,7 +757,7 @@ onUnmounted(() => {
   &.primary {
     background: var(--color-primary);
     border-color: var(--color-primary);
-    color: #fff;
+    color: var(--color-on-primary);
 
     &:hover {
       filter: brightness(1.08);

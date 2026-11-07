@@ -22,6 +22,8 @@ export interface UserRow {
 }
 
 export interface UserStore {
+  getAccentColor(userId: string): string;
+  setAccentColor(userId: string, color: string): boolean;
   countUsers(): number;
   countAdmins(): number;
   createUser(username: string, password: string, role: UserRole): Promise<UserRow>;
@@ -68,6 +70,12 @@ export function createUserStore(db: Database.Database): UserStore {
   const deleteUserStmt = db.prepare("DELETE FROM users WHERE id = ?");
 
   return {
+    getAccentColor(userId) {
+      return (db.prepare("SELECT accentColor FROM users WHERE id = ?").get(userId) as { accentColor: string } | undefined)?.accentColor ?? "#335eea";
+    },
+    setAccentColor(userId, color) {
+      return db.prepare("UPDATE users SET accentColor = ?, updatedAt = ? WHERE id = ? AND role != 'guest'").run(color, Date.now(), userId).changes > 0;
+    },
     countUsers() {
       return (countStmt.get() as { n: number }).n;
     },
