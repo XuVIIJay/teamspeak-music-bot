@@ -5,7 +5,9 @@ import router from './router/index.js';
 import { installApiClient } from './api/http.js';
 import './styles/global.scss';
 import './styles/mobile.scss';
+import { applyDocumentTheme, readThemePreference, resolveTheme } from './styles/theme.js';
 
+applyDocumentTheme(resolveTheme(readThemePreference()));
 installApiClient();
 
 const app = createApp(App);

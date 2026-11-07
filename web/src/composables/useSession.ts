@@ -7,6 +7,7 @@ interface User {
   capabilities?: string[];
   bots?: "all" | string[];
   guest?: Record<string, boolean> | null;
+  accentColor?: string | null;
 }
 
 const currentUser = ref<User | null>(null);
@@ -112,6 +113,20 @@ async function logout(): Promise<void> {
   currentUser.value = null;
 }
 
+async function saveAccentColor(accentColor: string): Promise<void> {
+  const userId = currentUser.value?.id;
+  const res = await fetch('/api/session/preferences', {
+    method: 'PUT', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accentColor }),
+  });
+  if (!res.ok) throw new Error('主题色保存失败，请稍后重试。');
+  const saved = await res.json();
+  if (currentUser.value?.id === userId && currentUser.value) {
+    currentUser.value = { ...currentUser.value, accentColor: saved.accentColor };
+  }
+}
+
 function can(cap: string): boolean {
   const u = currentUser.value;
   return !!u && (u.role === "admin" || (u.capabilities ?? []).includes(cap));
@@ -143,6 +158,7 @@ export function useSession() {
     logout,
     setup,
     continueAsGuest,
+    saveAccentColor,
     can,
     guestCan,
     canControlBot,

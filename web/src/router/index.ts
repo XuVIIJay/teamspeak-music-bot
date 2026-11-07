@@ -20,6 +20,7 @@ const router = createRouter({
       component: () => import('../views/Playlist.vue'),
       meta: { kind: 'album' },
     },
+    { path: '/artist/:id', name: 'artist', component: () => import('../views/Artist.vue') },
     { path: '/lyrics', name: 'lyrics', component: () => import('../views/Lyrics.vue') },
     { path: '/history', name: 'history', component: () => import('../views/History.vue') },
     { path: '/saved-queues', name: 'saved-queues', component: () => import('../views/SavedQueues.vue') },
@@ -59,8 +60,8 @@ router.beforeEach(async (to) => {
     return { name: 'login', query: { next: to.fullPath } };
   }
 
-  // Guests may never reach settings/setup, even by typing the URL.
-  const GUEST_BLOCKED = new Set(['settings', 'setup']);
+  // Guests can customize appearance; server configuration remains inaccessible.
+  const GUEST_BLOCKED = new Set(['setup']);
   if (session.isGuest.value && GUEST_BLOCKED.has(to.name as string)) {
     return { name: 'home' };
   }

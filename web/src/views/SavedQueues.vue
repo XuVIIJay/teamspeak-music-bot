@@ -209,7 +209,7 @@ onMounted(async () => {
   font-weight: 600;
   border-radius: var(--radius-sm);
   background: var(--color-primary);
-  color: #fff;
+  color: var(--color-on-primary);
   border: 1px solid var(--color-primary);
   cursor: pointer;
   transition: filter var(--transition-fast);
@@ -282,7 +282,7 @@ onMounted(async () => {
   transition: all var(--transition-fast);
   &:hover:not(:disabled) { background: var(--bg-secondary); border-color: var(--color-primary); }
   &:disabled { opacity: 0.5; cursor: not-allowed; }
-  &.primary { background: var(--color-primary); border-color: var(--color-primary); color: #fff; }
+  &.primary { background: var(--color-primary); border-color: var(--color-primary); color: var(--color-on-primary); }
   &.danger { color: #ef4444; }
 }
 

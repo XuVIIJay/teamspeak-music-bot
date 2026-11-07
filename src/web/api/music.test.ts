@@ -438,3 +438,182 @@ describe("music router POST /local/upload — content types and size cap (#149)"
     expect(uploadAudio).not.toHaveBeenCalled();
   });
 });
+
+describe("music router GET /bilibili/parts", () => {
+  it("returns 400 when bvid is missing", async () => {
+    const router = createMusicRouter(
+      fakeProvider("netease"),
+      fakeProvider("qq"),
+      fakeProvider("bilibili"),
+      pino({ level: "silent" })
+    );
+    const app = express();
+    app.use("/api/music", router);
+
+    const res = await request(app).get("/api/music/bilibili/parts");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("bvid is required");
+  });
+
+  it("returns parts from bilibili provider when available", async () => {
+    const mockBilibili = {
+      platform: "bilibili" as const,
+      search: vi.fn(),
+      getVideoParts: vi.fn().mockResolvedValue({
+        bvid: "BV1test",
+        title: "多P视频测试",
+        parts: [
+          { part: 1, cid: 101, title: "P1", duration: 100 },
+          { part: 2, cid: 102, title: "P2", duration: 200 },
+        ],
+      }),
+    };
+    const router = createMusicRouter(
+      fakeProvider("netease"),
+      fakeProvider("qq"),
+      mockBilibili as unknown as MusicProvider,
+      pino({ level: "silent" })
+    );
+    const app = express();
+    app.use("/api/music", router);
+
+    const res = await request(app).get("/api/music/bilibili/parts?bvid=BV1test");
+    expect(res.status).toBe(200);
+    expect(res.body.bvid).toBe("BV1test");
+    expect(res.body.parts).toHaveLength(2);
+    expect(mockBilibili.getVideoParts).toHaveBeenCalledWith("BV1test");
+  });
+
+  it("returns 404 when getVideoParts returns null", async () => {
+    const mockBilibili = {
+      platform: "bilibili" as const,
+      search: vi.fn(),
+      getVideoParts: vi.fn().mockResolvedValue(null),
+    };
+    const router = createMusicRouter(
+      fakeProvider("netease"),
+      fakeProvider("qq"),
+      mockBilibili as unknown as MusicProvider,
+      pino({ level: "silent" })
+    );
+    const app = express();
+    app.use("/api/music", router);
+
+    const res = await request(app).get("/api/music/bilibili/parts?bvid=BV1notfound");
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("music router GET /artist/:id", () => {
+  function artistProvider(overrides: Record<string, unknown> = {}): MusicProvider {
+    return {
+      platform: "netease",
+      search: vi.fn().mockResolvedValue(empty),
+      getArtistDetail: vi.fn().mockResolvedValue({
+        id: "6452",
+        name: "Adele",
+        avatarUrl: "http://p/1.jpg",
+        platform: "netease",
+        description: "English singer",
+      }),
+      getArtistSongs: vi.fn().mockResolvedValue([
+        { id: "1", name: "Hello", artist: "Adele", album: "25", duration: 295, coverUrl: "c", platform: "netease" },
+      ]),
+      getArtistAlbums: vi.fn().mockResolvedValue([
+        { id: "a1", name: "25", artist: "Adele", coverUrl: "c", songCount: 11, platform: "netease" },
+      ]),
+      ...overrides,
+    } as unknown as MusicProvider;
+  }
+
+  function mount(netease: MusicProvider, qq: MusicProvider = fakeProvider("qq")) {
+    const app = express();
+    app.use("/api/music", createMusicRouter(netease, qq, fakeProvider("bilibili"), pino({ level: "silent" })));
+    return app;
+  }
+
+  it("returns artist detail, hot songs and albums for the requested platform", async () => {
+    const netease = artistProvider();
+    const res = await request(mount(netease)).get("/api/music/artist/6452?platform=netease");
+
+    expect(res.status).toBe(200);
+    expect(res.body.artist).toMatchObject({ id: "6452", name: "Adele", description: "English singer" });
+    expect(res.body.songs).toHaveLength(1);
+    expect(res.body.albums).toHaveLength(1);
+    expect(netease.getArtistDetail).toHaveBeenCalledWith("6452");
+    expect(netease.getArtistSongs).toHaveBeenCalledWith("6452");
+    expect(netease.getArtistAlbums).toHaveBeenCalledWith("6452");
+  });
+
+  it("routes to the QQ provider when platform=qq", async () => {
+    const qq = artistProvider({ platform: "qq" });
+    const res = await request(mount(fakeProvider("netease"), qq)).get("/api/music/artist/abc?platform=qq");
+
+    expect(res.status).toBe(200);
+    expect(qq.getArtistDetail).toHaveBeenCalledWith("abc");
+  });
+
+  it("404s when the provider has no such artist", async () => {
+    const netease = artistProvider({ getArtistDetail: vi.fn().mockResolvedValue(null) });
+    const res = await request(mount(netease)).get("/api/music/artist/999");
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Artist not found");
+  });
+
+  it("501s when the provider does not support artists at all", async () => {
+    const res = await request(mount(fakeProvider("netease"))).get("/api/music/artist/1");
+    expect(res.status).toBe(501);
+    expect(res.body.error).toBe("Not supported by this provider");
+  });
+
+  it("degrades each leg independently — a failing songs/albums call still returns the hero", async () => {
+    const netease = artistProvider({
+      getArtistSongs: vi.fn().mockRejectedValue(new Error("boom")),
+      getArtistAlbums: vi.fn().mockRejectedValue(new Error("boom")),
+    });
+    const res = await request(mount(netease)).get("/api/music/artist/6452");
+
+    expect(res.status).toBe(200);
+    expect(res.body.artist.name).toBe("Adele");
+    expect(res.body.songs).toEqual([]);
+    expect(res.body.albums).toEqual([]);
+  });
+
+  it("tolerates a provider that only implements getArtistDetail", async () => {
+    const netease = artistProvider({ getArtistSongs: undefined, getArtistAlbums: undefined });
+    const res = await request(mount(netease)).get("/api/music/artist/6452");
+
+    expect(res.status).toBe(200);
+    expect(res.body.songs).toEqual([]);
+    expect(res.body.albums).toEqual([]);
+  });
+});
+
+describe("music router GET /search/all artist aggregation", () => {
+  function searchProvider(platform: MusicProvider["platform"], artists: unknown[]): MusicProvider {
+    return {
+      platform,
+      search: vi.fn().mockResolvedValue({ ...empty, artists }),
+    } as unknown as MusicProvider;
+  }
+
+  it("merges artists from netease and qq and ignores sources without artists", async () => {
+    const app = express();
+    app.use(
+      "/api/music",
+      createMusicRouter(
+        searchProvider("netease", [{ id: "1", name: "N", avatarUrl: "", platform: "netease" }]),
+        searchProvider("qq", [{ id: "2", name: "Q", avatarUrl: "", platform: "qq" }]),
+        fakeProvider("bilibili"),
+        pino({ level: "silent" })
+      )
+    );
+
+    const res = await request(app).get("/api/music/search/all?q=adele");
+    expect(res.status).toBe(200);
+    expect(res.body.artists).toEqual([
+      { id: "1", name: "N", avatarUrl: "", platform: "netease" },
+      { id: "2", name: "Q", avatarUrl: "", platform: "qq" },
+    ]);
+  });
+});

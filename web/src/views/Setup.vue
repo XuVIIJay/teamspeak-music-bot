@@ -239,13 +239,13 @@ async function saveJellyfinAndNext() {
 
 .step.active .step-dot {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-on-primary);
   opacity: 1;
 }
 
 .step.done .step-dot {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-on-primary);
   opacity: 0.7;
 }
 
@@ -302,7 +302,7 @@ async function saveJellyfinAndNext() {
 .btn-primary {
   padding: 10px 32px;
   background: var(--color-primary);
-  color: white;
+  color: var(--color-on-primary);
   border-radius: var(--radius-md);
   font-size: 14px;
   font-weight: 600;

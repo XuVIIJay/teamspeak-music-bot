@@ -68,7 +68,7 @@ async function submit() {
 }
 .auth-card button {
   height: 38px; border-radius: var(--radius-sm); border: 0;
-  background: var(--color-primary); color: #fff; font-weight: 500; cursor: pointer;
+  background: var(--color-primary); color: var(--color-on-primary); font-weight: 500; cursor: pointer;
 }
 .auth-card button:disabled { opacity: 0.6; cursor: progress; }
 .auth-error { color: #e26a6a; font-size: 13px; margin: 0; }

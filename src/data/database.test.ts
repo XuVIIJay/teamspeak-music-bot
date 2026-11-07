@@ -37,11 +37,33 @@ describe("database", () => {
 
     const userCols = botDb.db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
     const userColNames = userCols.map((c) => c.name).sort();
-    expect(userColNames).toEqual(["createdAt", "id", "passwordHash", "role", "updatedAt", "username"]);
+    expect(userColNames).toEqual(["accentColor", "createdAt", "id", "passwordHash", "role", "updatedAt", "username"]);
 
     const sessionCols = botDb.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
     const sessionColNames = sessionCols.map((c) => c.name).sort();
     expect(sessionColNames).toEqual(["createdAt", "expiresAt", "id", "lastSeenAt", "userId"]);
+  });
+
+  it("migrates existing accounts and preserves their accent across database reopen", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tsmb-accent-'));
+    const path = join(dir, 'test.db');
+    let db = createDatabase(path);
+    try {
+      const user = await createUserStore(db.db).createUser('alice', 'test-password', 'member');
+      db.db.exec('ALTER TABLE users DROP COLUMN accentColor');
+      db.close();
+      db = createDatabase(path);
+      const users = createUserStore(db.db);
+      expect(users.getAccentColor(user.id)).toBe('#335eea');
+      users.setAccentColor(user.id, '#0891b2');
+      db.close();
+      db = createDatabase(path);
+      expect(createUserStore(db.db).getAccentColor(user.id)).toBe('#0891b2');
+      expect(createUserStore(db.db).findById(user.id)?.username).toBe('alice');
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("creates user_audit table on init", () => {
@@ -343,5 +365,38 @@ describe("guest principal migration", () => {
     expect(users.countUsers()).toBe(0); // guest excluded → still needs setup
     d.db.close();
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("user music cookies (#164)", () => {
+  let botDb: BotDatabase;
+  const addUser = (id: string) =>
+    botDb.db
+      .prepare("INSERT INTO users (id, username, passwordHash, createdAt, updatedAt, role) VALUES (?,?,?,?,?,?)")
+      .run(id, id, "x", 0, 0, "member");
+
+  beforeEach(() => {
+    botDb = createDatabase(":memory:");
+    addUser("u1");
+    addUser("u2");
+  });
+  afterEach(() => botDb.close());
+
+  it("stores, overwrites and deletes a cookie per user and platform", () => {
+    expect(botDb.getUserMusicCookie("u1", "netease")).toBeNull();
+    botDb.setUserMusicCookie("u1", "netease", "MUSIC_U=a");
+    botDb.setUserMusicCookie("u1", "netease", "MUSIC_U=b");
+    expect(botDb.getUserMusicCookie("u1", "netease")).toBe("MUSIC_U=b");
+    expect(botDb.getUserMusicCookie("u2", "netease")).toBeNull();
+    expect(botDb.getUserMusicCookie("u1", "qq")).toBeNull();
+    expect(botDb.deleteUserMusicCookie("u1", "netease")).toBe(true);
+    expect(botDb.deleteUserMusicCookie("u1", "netease")).toBe(false);
+    expect(botDb.getUserMusicCookie("u1", "netease")).toBeNull();
+  });
+
+  it("drops a user's cookies when the user is deleted", () => {
+    botDb.setUserMusicCookie("u1", "netease", "MUSIC_U=a");
+    botDb.db.prepare("DELETE FROM users WHERE id = ?").run("u1");
+    expect(botDb.getUserMusicCookie("u1", "netease")).toBeNull();
   });
 });

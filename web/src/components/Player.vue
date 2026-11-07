@@ -426,7 +426,7 @@ function cycleMode() {
   align-items: center;
   justify-content: center;
   font-size: 18px;
-  color: white;
+  color: var(--color-on-primary);
   transition: transform var(--transition-fast);
   &:hover { transform: scale(1.08); }
   &:active { transform: scale(0.95); }
