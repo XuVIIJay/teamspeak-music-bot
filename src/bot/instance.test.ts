@@ -1627,6 +1627,7 @@ describe("cmdPlaylist with a playlist link (#160)", () => {
       withRequester: (s: any) => s,
       resolveAndPlay: vi.fn(async () => true),
       sweepLocalAudio: vi.fn(),
+      getTrialWarning: vi.fn(async () => ""),
       emit: vi.fn(),
     };
   }
