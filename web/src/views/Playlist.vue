@@ -227,7 +227,7 @@ async function toggleFavorite() {
   gap: 6px;
   padding: 10px 28px;
   background: var(--color-primary);
-  color: white;
+  color: var(--color-on-primary);
   border-radius: var(--radius-lg);
   font-size: 14px;
   font-weight: 600;

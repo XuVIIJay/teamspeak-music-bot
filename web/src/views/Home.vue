@@ -455,7 +455,7 @@ onMounted(() => {
   width: 56px;
   height: 56px;
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--color-primary), #6366f1);
+  background: var(--gradient-fm);
   display: flex;
   align-items: center;
   justify-content: center;

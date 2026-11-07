@@ -1,5 +1,5 @@
 import express, { Router, type Response } from "express";
-import type { MusicProvider, Song, Album } from "../../music/provider.js";
+import type { MusicProvider, Song, Album, SearchResult } from "../../music/provider.js";
 import { YouTubeProvider } from "../../music/youtube.js";
 import type { Logger } from "../../logger.js";
 import { isProviderEnabled, defaultPlatform, saveConfig, type BotConfig } from "../../data/config.js";
@@ -198,7 +198,7 @@ export function createMusicRouter(
       // searched. Jellyfin (an opt-in source) leads the merged results when
       // enabled — a self-hosted library match is almost always the wanted one.
       const enabled = (p: string) => !config || isProviderEnabled(config, p);
-      const none = { songs: [], albums: [], playlists: [] };
+      const none: SearchResult = { songs: [], albums: [], playlists: [] };
       const [jellyfinResult, neteaseResult, qqResult, bilibiliResult, localResult, kugouResult] = await Promise.allSettled([
         jellyfinProvider && enabled("jellyfin") ? jellyfinProvider.search(q as string, parsedLimit) : Promise.resolve(none),
         enabled("netease") ? neteaseProvider.search(q as string, parsedLimit) : Promise.resolve(none),
@@ -226,8 +226,14 @@ export function createMusicRouter(
         ...(neteaseResult.status === "fulfilled" ? neteaseResult.value.playlists : []),
         ...(qqResult.status === "fulfilled" ? qqResult.value.playlists : []),
       ];
+      // Artists come only from the sources that model them (netease/qq); other
+      // providers simply contribute nothing.
+      const artists = [
+        ...(neteaseResult.status === "fulfilled" ? neteaseResult.value.artists ?? [] : []),
+        ...(qqResult.status === "fulfilled" ? qqResult.value.artists ?? [] : []),
+      ];
 
-      res.json({ songs, albums, playlists });
+      res.json({ songs, albums, playlists, artists });
     } catch (err) {
       logger.error({ err }, "Unified search failed");
       res.status(500).json({ error: (err as Error).message });
@@ -292,6 +298,36 @@ export function createMusicRouter(
       if (!provider) return;
       const lyrics = await provider.getLyrics(req.params.id);
       res.json({ lyrics });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.get("/artist/:id", async (req, res) => {
+    try {
+      const provider = resolveProvider(req.query.platform, res);
+      if (!provider) return;
+      if (!provider.getArtistDetail) {
+        res.status(501).json({ error: "Not supported by this provider" });
+        return;
+      }
+      // Each piece degrades independently: a source that cannot list albums (or
+      // a transient upstream failure) must not take the hero or the songs down
+      // with it, so every call falls back to an empty value.
+      const [artist, songs, albums] = await Promise.all([
+        provider.getArtistDetail(req.params.id).catch(() => null),
+        provider.getArtistSongs
+          ? provider.getArtistSongs(req.params.id).catch(() => [] as Song[])
+          : Promise.resolve([] as Song[]),
+        provider.getArtistAlbums
+          ? provider.getArtistAlbums(req.params.id).catch(() => [] as Album[])
+          : Promise.resolve([] as Album[]),
+      ]);
+      if (!artist) {
+        res.status(404).json({ error: "Artist not found" });
+        return;
+      }
+      res.json({ artist, songs, albums });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
@@ -378,6 +414,31 @@ export function createMusicRouter(
       }
     } catch (err) {
       logger.error({ err }, "Get bilibili popular failed");
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // B站分P列表查询
+  router.get("/bilibili/parts", async (req, res) => {
+    try {
+      const bvid = (req.query.bvid as string)?.trim();
+      if (!bvid) {
+        res.status(400).json({ error: "bvid is required" });
+        return;
+      }
+      const provider = bilibiliProvider as any;
+      if (typeof provider.getVideoParts === "function") {
+        const result = await provider.getVideoParts(bvid);
+        if (!result) {
+          res.status(404).json({ error: "Video not found" });
+          return;
+        }
+        res.json(result);
+      } else {
+        res.status(501).json({ error: "Not supported" });
+      }
+    } catch (err) {
+      logger.error({ err }, "Get bilibili parts failed");
       res.status(500).json({ error: (err as Error).message });
     }
   });
