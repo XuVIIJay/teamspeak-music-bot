@@ -11,14 +11,14 @@
  * VERIFICATION NOTE: search and lyrics were verified live during development.
  * The play-URL endpoint (`/v5/url`) is gated by Kugou's risk-control and may
  * return `errcode 20028 "本次请求需要验证"` from flagged (datacenter) IPs even
- * for free songs; on such hosts a logged-in session (QR login below) and/or a
- * residential IP is required. QR login and VIP audio could not be verified in
- * the build environment.
+ * for free songs. Surface explicit verification requests to the operator.
  */
+import { normalizeCookie } from "./cookie-normalize.js";
 import axios, { type AxiosInstance } from "axios";
 import crypto from "node:crypto";
 import zlib from "node:zlib";
 import { parseLyrics } from "./netease.js";
+import { playbackRequestFailure, SongUrlUnavailable } from "./provider.js";
 import type {
   Album,
   AuthStatus,
@@ -442,7 +442,9 @@ export class KugouProvider implements MusicProvider {
   // --- Cookie persistence (CookieStore stores a flat "k=v; k=v" string) ------
   setCookie(cookie: string): void {
     const map: CookieMap = {};
-    for (const part of (cookie || "").split(";")) {
+    // Normalise first: a pasted `Set-Cookie` line would otherwise land
+    // Max-Age/Expires/Path in the map as cookie names.
+    for (const part of normalizeCookie(cookie).split(";")) {
       const eq = part.indexOf("=");
       if (eq < 0) continue;
       const k = part.slice(0, eq).trim();
@@ -466,6 +468,27 @@ export class KugouProvider implements MusicProvider {
   }
   getQuality(): string {
     return this.quality;
+  }
+
+  /**
+   * A view of the same provider logged in as another account (#164 follow-up):
+   * a web user's own 酷狗 login instead of the bot's shared one.
+   *
+   * Kugou signs every request with the device identity (guid/mid) and binds the
+   * session token to it, so the view MUST reuse this instance's device instead
+   * of generating a fresh one — otherwise the installed cookie is rejected as
+   * coming from an unknown device.
+   */
+  withCookie(cookie: string): KugouProvider {
+    const view = new KugouProvider();
+    view.guid = this.guid;
+    view.mid = this.mid;
+    // Share the in-flight dfid registration: it is device-scoped, not account-
+    // scoped, and sharing avoids a duplicate /register/dev per request.
+    view.dfidPromise = this.dfidPromise;
+    view.quality = this.quality;
+    view.setCookie(cookie);
+    return view;
   }
 
   // --- Shared signed request pipeline (mirrors util/request.js) --------------
@@ -639,8 +662,9 @@ export class KugouProvider implements MusicProvider {
     if (!hash) return null;
     await this.ensureDfid();
     const q = quality ? (QUALITY_MAP[quality] ?? this.quality) : this.quality;
+    let data;
     try {
-      const data = await this.request({
+      data = await this.request({
         method: "GET",
         url: "/v5/url",
         xRouter: "trackercdn.kugou.com",
@@ -668,14 +692,34 @@ export class KugouProvider implements MusicProvider {
           clientver: 11430,
         },
       });
-      const urls: string[] = Array.isArray(data?.url) ? data.url : [];
-      const backup: string[] = Array.isArray(data?.backupUrl) ? data.backupUrl : [];
-      const url = urls.find(Boolean) || backup.find(Boolean);
-      if (!url) return null;
-      return { url };
-    } catch {
-      return null;
+    } catch (error) {
+      const responseData = (error as { response?: { data?: unknown } } | null)?.response?.data;
+      throw this.kugouVerificationFailure(songId, responseData) ?? playbackRequestFailure(this.platform, songId, error);
     }
+    const verification = this.kugouVerificationFailure(songId, data);
+    if (verification) throw verification;
+    const urls: unknown[] = Array.isArray(data?.url) ? data.url : [];
+    const backup: unknown[] = Array.isArray(data?.backupUrl) ? data.backupUrl : [];
+    const url = [...urls, ...backup].find((value): value is string => typeof value === "string" && value.length > 0);
+    if (url) return { url };
+    throw new SongUrlUnavailable({
+      platform: this.platform,
+      songId,
+      code: "unknown",
+      message: "酷狗未返回播放地址",
+    });
+  }
+
+  private kugouVerificationFailure(songId: string, data: unknown): SongUrlUnavailable | undefined {
+    const code = (data as { errcode?: unknown } | null)?.errcode;
+    if (code !== 20028 && code !== "20028") return;
+    return new SongUrlUnavailable({
+      platform: this.platform,
+      songId,
+      code: "provider_verification_required",
+      message: "酷狗要求完成验证（20028），请在酷狗检查账号状态",
+      upstream: { code: 20028 },
+    });
   }
 
   async getSongDetail(songId: string): Promise<Song | null> {

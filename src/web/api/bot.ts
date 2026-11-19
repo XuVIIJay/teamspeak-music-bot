@@ -74,7 +74,10 @@ export function createBotRouter(
       voiceDucking: config.voiceDucking,
       localAudioEnabled: config.localAudioEnabled,
       savedQueuesEnabled: config.savedQueuesEnabled,
+      perUserMusicAccounts: config.perUserMusicAccounts === true,
       playKeepsQueue: config.playKeepsQueue,
+      // Silent re-resolve budget for a track whose URL came back empty.
+      playUrlRetries: config.playUrlRetries ?? 0,
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
       spotify: maskedSpotify(),
@@ -94,6 +97,8 @@ export function createBotRouter(
       voiceDucking,
       guestMode,
       adminGroups,
+      playUrlRetries,
+      perUserMusicAccounts,
     } = req.body;
 
     const hasIdle = idleTimeoutMinutes !== undefined;
@@ -104,10 +109,31 @@ export function createBotRouter(
 
     const hasAutoPause = typeof autoPauseOnEmpty === "boolean";
     const hasLocalAudioEnabled = typeof localAudioEnabled === "boolean";
+    // Retry budget is an integer 0..5; out-of-range is a client bug, not
+    // something to silently clamp, so it 400s like the other numeric fields.
+    const hasPlayUrlRetries = playUrlRetries !== undefined;
+    if (
+      hasPlayUrlRetries &&
+      (typeof playUrlRetries !== "number" ||
+        !Number.isInteger(playUrlRetries) ||
+        playUrlRetries < 0 ||
+        playUrlRetries > 5)
+    ) {
+      res.status(400).json({ error: "playUrlRetries must be an integer 0-5" });
+      return;
+    }
+
+    const hasPerUserMusicAccounts = typeof perUserMusicAccounts === "boolean";
+    if (hasPerUserMusicAccounts && req.user?.role !== "admin") {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
 
     if (hasIdle) config.idleTimeoutMinutes = idleTimeoutMinutes;
     if (hasAutoPause) config.autoPauseOnEmpty = autoPauseOnEmpty;
     if (hasLocalAudioEnabled) config.localAudioEnabled = localAudioEnabled;
+    if (hasPlayUrlRetries) config.playUrlRetries = playUrlRetries;
+    if (hasPerUserMusicAccounts) config.perUserMusicAccounts = perUserMusicAccounts;
 
     // Voice ducking is a partial settings block. Merge only known, strictly
     // valid fields so malformed JSON cannot replace the object or inject NaN /
@@ -282,7 +308,10 @@ export function createBotRouter(
       voiceDucking: config.voiceDucking,
       localAudioEnabled: config.localAudioEnabled,
       savedQueuesEnabled: config.savedQueuesEnabled,
+      perUserMusicAccounts: config.perUserMusicAccounts === true,
       playKeepsQueue: config.playKeepsQueue,
+      // Silent re-resolve budget for a track whose URL came back empty.
+      playUrlRetries: config.playUrlRetries ?? 0,
       adminGroups: config.adminGroups ?? [],
       guestMode: config.guestMode,
       spotify: maskedSpotify(),
