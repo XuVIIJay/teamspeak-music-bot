@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { BotInstance, COMMAND_DENIED_MESSAGE, spotifyPortsForBotId } from "./instance.js";
 import type { BotInstanceOptions } from "./instance.js";
-import { PlayQueue, PlayMode } from "../audio/queue.js";
+import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import { AudioPlayer } from "../audio/player.js";
 import { createDatabase, SHARED_QUEUE_OWNER } from "../data/database.js";
 import { parseCommand } from "./commands.js";
 import type { TS3TextMessage } from "../ts-protocol/client.js";
 import type { SpotifyController } from "../music/spotify/controller.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
-import type { MusicProvider } from "../music/provider.js";
+import type { MusicProvider, PlayFailure } from "../music/provider.js";
 import type { BotDatabase } from "../data/database.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { BotConfig } from "../data/config.js";
@@ -396,6 +396,20 @@ const resolveAndPlay = BotInstance.prototype.resolveAndPlay as (
   this: unknown,
   song: any,
 ) => Promise<boolean>;
+
+it("re-resolves an active web FM account before fetching more songs", async () => {
+  const old = { platform: "netease", getCookie: () => "old", getPersonalFm: vi.fn(async () => []) };
+  const shared = { platform: "netease", getCookie: () => "shared", getPersonalFm: vi.fn(async () => []) };
+  const context = {
+    isFmMode: true,
+    fmProvider: old,
+    resolveFmProvider: () => shared,
+    logger: { error: vi.fn() },
+  };
+  await (BotInstance.prototype as unknown as { refillFm(): Promise<void> }).refillFm.call(context);
+  expect(old.getPersonalFm).not.toHaveBeenCalled();
+  expect(shared.getPersonalFm).toHaveBeenCalledOnce();
+});
 const setupPlayerEvents = (BotInstance.prototype as any).setupPlayerEvents as (
   this: unknown,
 ) => void;
@@ -461,6 +475,7 @@ function makeResolveCtx(opts: {
     config: {},
     id: "bot1",
     voteSkipUsers: new Set<string>(),
+    queue: { current: vi.fn(() => null) },
     autoPaused: false,
     currentSourceIsSpotify: opts.currentSourceIsSpotify ?? false,
     effectiveDuration: undefined,
@@ -486,6 +501,117 @@ function spotifySong() {
     url: "",
   };
 }
+
+it("does not start a track whose URL resolved after the queue was cleared", async () => {
+  const player = makePlayer();
+  const song = { ...spotifySong(), platform: "netease" };
+  const ctx = makeResolveCtx({ controller: makeController(), player, url: "" });
+  ctx.queue.current.mockReturnValue(song);
+  ctx.getProviderFor.mockReturnValue({
+    getSongUrl: async () => {
+      ctx.queue.current.mockReturnValue(null);
+      return { url: "https://example.com/track" };
+    },
+  });
+
+  expect(await resolveAndPlay.call(ctx, song)).toBe(false);
+  expect(player.play).not.toHaveBeenCalled();
+});
+
+it.each(["netease", "spotify"])("keeps %s playback successful when saving history fails", async platform => {
+  const player = makePlayer();
+  const url = platform === "spotify" ? "spotify:track:abc" : "https://example.com/track";
+  const ctx = makeResolveCtx({ controller: makeController(), player, url });
+  ctx.database.addPlayHistory.mockImplementation(() => { throw new Error("Database temporarily unavailable"); });
+
+  expect(await resolveAndPlay.call(ctx, { ...spotifySong(), platform })).toBe(true);
+  expect(player.getState()).toBe("playing");
+  expect(ctx.emit).toHaveBeenCalledWith("stateChange");
+  expect(ctx.syncProfileToSong).toHaveBeenCalledTimes(1);
+});
+
+it("advances again when a track ends during a slow profile upload", async () => {
+  const player = Object.assign(new EventEmitter(), makePlayer(), {
+    getPlaybackSessionId: vi.fn(() => 1),
+  });
+  const ctx = makeResolveCtx({ controller: makeController(), player, url: "https://example.com/track" });
+  const queue = new PlayQueue();
+  for (const id of ["previous", "short", "following"]) {
+    queue.add({ ...spotifySong(), id, platform: "netease" });
+  }
+  queue.play();
+  ctx.queue = queue;
+  ctx.resumeInterruptedStream = vi.fn(async () => false);
+  ctx.resolveAndPlay = resolveAndPlay.bind(ctx);
+  ctx.playNext = playNext.bind(ctx);
+  ctx.sweepLocalAudio = vi.fn();
+  ctx.spotifyController = Object.assign(new EventEmitter(), { on: EventEmitter.prototype.on });
+  const profileStarted = deferred();
+  const finishProfile = deferred();
+  ctx.syncProfileToSong.mockImplementationOnce(() => {
+    profileStarted.resolve();
+    return finishProfile.promise;
+  });
+  setupPlayerEvents.call(ctx);
+
+  const advancing = ctx.playNext();
+  await profileStarted.promise;
+  try {
+    player.stop();
+    player.emit("trackEnd");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(queue.current()?.id).toBe("following");
+  } finally {
+    finishProfile.resolve();
+    await advancing;
+  }
+});
+
+it("reports the reason when the next track cannot be started", async () => {
+  const current = { ...spotifySong(), id: "next", platform: "netease" };
+  const ctx = {
+    connected: true,
+    queue: { current: () => current },
+    playNext: async (_maxRetries: number, report?: (failure: { message: string }) => void) => {
+      report?.({ message: "网易云暂时拒绝播放请求（-460），请稍后重试" });
+      return false;
+    },
+  };
+  expect(await BotInstance.prototype.skipToNext.call(ctx as unknown as BotInstance)).toEqual({
+    ok: false,
+    message: expect.stringContaining("-460"),
+  });
+});
+
+describe("queue advancement after a provider-wide failure", () => {
+  it.each([
+    ["netease", "risk_control"],
+    ["kugou", "provider_verification_required"],
+  ] as const)("skips queued %s tracks without spending retries for other sources", async (platform, code) => {
+    const queue = new PlayQueue();
+    for (let i = 0; i < 8; i++) queue.add({ ...spotifySong(), id: String(i), platform });
+    const available = { ...spotifySong(), id: "available", platform: "qq" as const };
+    queue.add(available);
+    const ctx = {
+      connected: true,
+      queue,
+      player: makePlayer(),
+      voteSkipUsers: new Set<string>(),
+      resolveAndPlay: vi.fn(async (track: QueuedSong, onFailure: (failure: PlayFailure) => void) => {
+        if (track.platform === "qq") return true;
+        onFailure({ platform, songId: track.id, code, message: "Provider unavailable" });
+        return false;
+      }),
+      profileManager: { onSongChange: vi.fn(async () => {}) },
+      sweepLocalAudio: vi.fn(),
+      emit: vi.fn(),
+    };
+
+    expect(await playNext.call(ctx)).toBe(true);
+    expect(ctx.resolveAndPlay.mock.calls.map(([track]) => track.id)).toEqual(["0", "available"]);
+    expect(queue.current()?.id).toBe("available");
+  });
+});
 
 describe("BotInstance.resolveAndPlay — Spotify routing (C4)", () => {
   it("routes a spotify song to controller.playTrack + player.playPcmStream, not player.play", async () => {
@@ -1271,6 +1397,7 @@ const playSingleSong = BotInstance.prototype.playSingleSong as (
   this: unknown,
   song: unknown,
   requesterName?: string,
+  onFailure?: (failure: PlayFailure, currentTrackContinues?: boolean) => void,
 ) => Promise<boolean>;
 const loadSavedQueue = BotInstance.prototype.loadSavedQueue as (
   this: unknown,
@@ -1313,7 +1440,10 @@ describe("BotInstance.playSingleSong / playKeepsQueue (#119)", () => {
       isSameSong,
       disableFmMode: vi.fn(),
       sweepLocalAudio: vi.fn(),
-      resolveAndPlay: vi.fn(async () => true),
+      resolveAndPlay: vi.fn(async (_song, _onFailure, commitQueue?: () => void) => {
+        commitQueue?.();
+        return true;
+      }),
     } as any;
   }
 
@@ -1346,6 +1476,93 @@ describe("BotInstance.playSingleSong / playKeepsQueue (#119)", () => {
     await playSingleSong.call(ctx, song119("b"), "alice");
     expect(ctx.queue.list().map((s: any) => s.id)).toEqual(["b"]);
     expect(ctx.queue.current()?.id).toBe("b");
+  });
+
+  it.each([
+    [false, "new"], [false, "old"], [true, "new"], [true, "old"],
+  ] as const)("retains the current queue and stream after a failed direct start (keep=%s, requested=%s)", async (keep, id) => {
+    const ctx = makeCtx(keep);
+    const current = song119("old");
+    ctx.queue.add(current);
+    ctx.queue.add(song119("following"));
+    ctx.queue.play();
+    ctx.player._play();
+    ctx.player.getPlaybackSessionId = () => 3;
+    ctx.resolveAndPlay.mockImplementation(async (_track: QueuedSong, onFailure?: (failure: PlayFailure) => void) => {
+      onFailure?.({ platform: "netease", songId: id, code: "unknown", message: "No URL" });
+      return false;
+    });
+    const failure = vi.fn();
+
+    expect(await playSingleSong.call(ctx, song119(id), "alice", failure)).toBe(false);
+    expect(ctx.queue.current()).toBe(current);
+    expect(ctx.queue.list().map((song: QueuedSong) => song.id)).toEqual(["old", "following"]);
+    expect(ctx.player.stop).not.toHaveBeenCalled();
+    expect(ctx.disableFmMode).not.toHaveBeenCalled();
+    expect(ctx.sweepLocalAudio).not.toHaveBeenCalled();
+    expect(failure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: "No URL" }), id === "old");
+  });
+
+  function makeRealStartCtx() {
+    const queue = new PlayQueue();
+    queue.add(song119("old"));
+    queue.add(song119("following"));
+    queue.play();
+    const player = Object.assign(new EventEmitter(), makePlayer(), {
+      resetFailures: vi.fn(), getPlaybackSessionId: () => 1,
+    });
+    const ctx = Object.assign(makeResolveCtx({ controller: makeController(), player, url: "" }), {
+      queue, player, withRequester, isSameSong, disableFmMode: vi.fn(),
+      sweepLocalAudio: vi.fn(), spotifyController: new EventEmitter(),
+      resumeInterruptedStream: async () => false,
+    });
+    ctx.playNext = BotInstance.prototype.playNext.bind(ctx);
+    ctx.resolveAndPlay = BotInstance.prototype.resolveAndPlay.bind(ctx);
+    setupPlayerEvents.call(ctx);
+    return ctx;
+  }
+
+  it("looks up a successful direct play once and commits the queue before status publication", async () => {
+    const ctx = makeRealStartCtx();
+    const getSongUrl = vi.fn(async () => ({ url: "https://example.test/new.mp3" }));
+    ctx.getProviderFor.mockReturnValue({ platform: "netease", getSongUrl });
+    ctx.emit.mockImplementation((event: string) => {
+      if (event === "stateChange") expect(ctx.queue.current()?.id).toBe("new");
+    });
+
+    expect(await playSingleSong.call(ctx, song119("new"), "alice")).toBe(true);
+    expect(getSongUrl).toHaveBeenCalledTimes(1);
+    expect(ctx.queue.current()).toMatchObject({ id: "new", requestedBy: "alice", url: "https://example.test/new.mp3" });
+    expect(ctx.emit).toHaveBeenCalledExactlyOnceWith("stateChange");
+  });
+
+  it("lets the current track end normally during an unresolved direct request", async () => {
+    const ctx = makeRealStartCtx();
+    ctx.player.play("https://example.test/old.mp3");
+    ctx.player.play.mockClear();
+    const lookupStarted = deferred();
+    const directLookup = deferred<{ url: string }>();
+    const getSongUrl = vi.fn(async (id: string) => {
+      if (id === "new") {
+        lookupStarted.resolve();
+        return directLookup.promise;
+      }
+      return { url: "https://example.test/following.mp3" };
+    });
+    ctx.getProviderFor.mockReturnValue({ platform: "netease", getSongUrl });
+    const request = playSingleSong.call(ctx, song119("new"));
+    await lookupStarted.promise;
+    expect(ctx.queue.current()?.id).toBe("old");
+    expect(ctx.player.getState()).toBe("playing");
+    ctx.player.stop();
+    ctx.player.emit("trackEnd");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    directLookup.resolve({ url: "https://example.test/stale.mp3" });
+
+    expect(await request).toBe(false);
+    expect(ctx.queue.current()?.id).toBe("following");
+    expect(getSongUrl.mock.calls.map(([id]) => id)).toEqual(["new", "following"]);
+    expect(ctx.player.play).toHaveBeenCalledExactlyOnceWith("https://example.test/following.mp3", 0, 1);
   });
 });
 
@@ -1544,6 +1761,36 @@ describe("BotInstance live-queue persistence (#119)", () => {
 });
 
 describe("BotInstance Bilibili multi-P resolution", () => {
+  it("passes the page from a TeamSpeak video link to the Bilibili provider", async () => {
+    const song = {
+      id: "BV1yxHQeYEuE?p=2",
+      name: "Video - P2",
+      artist: "Uploader",
+      album: "",
+      duration: 180,
+      coverUrl: "",
+      platform: "bilibili" as const,
+    };
+    const provider = { platform: "bilibili", getSongDetail: vi.fn().mockResolvedValue(song) };
+    const ctx = {
+      config: { commandPrefix: "!" },
+      assertProviderEnabled: vi.fn(),
+      getProviderFor: vi.fn().mockReturnValue(provider),
+    };
+    const args = "[URL]https://www.bilibili.com/video/BV1yxHQeYEuE/?p=2[/URL]";
+
+    const result = await (BotInstance.prototype as any).resolvePlayQuery.call(ctx, {
+      name: "play",
+      args,
+      rawArgs: [args],
+      flags: new Set(),
+    });
+
+    expect(ctx.getProviderFor).toHaveBeenCalledWith("bilibili");
+    expect(provider.getSongDetail).toHaveBeenCalledWith("BV1yxHQeYEuE?p=2");
+    expect(result.song).toEqual(song);
+  });
+
   it("resolves multi-P search result to P1 with accurate duration and name", async () => {
     const multiPSongDetail = {
       id: "BV1multiP?p=1",
@@ -1650,6 +1897,12 @@ describe("cmdPlaylist with a playlist link (#160)", () => {
     expect(ctx.providers.netease.search).not.toHaveBeenCalled();
   });
 
+  it("reports a refused first track instead of announcing playback", async () => {
+    const ctx = makeCtx();
+    ctx.resolveAndPlay.mockResolvedValue(false);
+    expect(await cmdPlaylist.call(ctx, cmd("2829883282"))).toBe("Cannot play: Song");
+  });
+
   it("checks the link's platform is enabled", async () => {
     const ctx = makeCtx();
     ctx.assertProviderEnabled.mockImplementation(() => { throw new Error("音源未启用：qq"); });
@@ -1705,7 +1958,7 @@ describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", 
   it("re-resolves the URL and resumes at the current position when a B站 stream ends early", async () => {
     const ctx = makeCtx({ elapsed: 1000, duration: 10_000 });
     expect(await resumeInterruptedStream.call(ctx)).toBe(true);
-    expect(ctx.provider.getSongUrl).toHaveBeenCalledWith("BV1abc");
+    expect(ctx.provider.getSongUrl).toHaveBeenCalledExactlyOnceWith("BV1abc", undefined, { avoidHosts: new Set() });
     expect(ctx.player.play).toHaveBeenCalledWith("https://fresh.test/a.m4s", 1000, 10_000);
     expect(ctx.song.url).toBe("https://fresh.test/a.m4s");
   });
@@ -1781,6 +2034,10 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     player.getPlaybackSessionId = AudioPlayer.prototype.getPlaybackSessionId;
     player.pause = AudioPlayer.prototype.pause;
     player.resume = AudioPlayer.prototype.resume;
+    // The real pause()/resume() drive the de-click transport ramp
+    // (a0f0b49..6f165b5). A stub player must expose it too, or the prototype
+    // methods throw "setTransportRamp is not a function".
+    player.setTransportRamp = vi.fn();
     player.play = vi.fn(() => { player.sessionId++; player.state = "playing"; });
     const provider = { getSongUrl: vi.fn(async () => ({ url: "fresh" })) };
     const advances: string[] = [];
@@ -1947,5 +2204,153 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     lookup.reject(new Error("temporary lookup failure"));
     await flushEvents();
     expect(ctx.advances).toEqual([]);
+  });
+});
+
+describe("BotInstance — OpenProtocol & command routing", () => {
+  it("routes private DM command replies to invokerId and channel replies to the channel", async () => {
+    const ctx = makeGateCtx({ adminGroups: [] });
+    ctx.executeCommand = vi.fn(async (parsed: { name: string; args: string }) =>
+      `ok:${parsed.name}:${parsed.args}`,
+    );
+
+    const dm: TS3TextMessage = {
+      invokerName: "FlSpeakUser",
+      invokerId: "12",
+      invokerUid: "uid-fl",
+      message: "!play 晴天",
+      targetMode: 1,
+      invokerGroups: [],
+    };
+    await handleTextMessage.call(ctx, dm);
+
+    expect(ctx.executeCommand).toHaveBeenCalledTimes(1);
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledTimes(1);
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith("ok:play:晴天", 1, 12);
+
+    ctx.tsClient.sendTextMessage.mockClear();
+    await handleTextMessage.call(ctx, makeMsg("!now"));
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith("ok:now:");
+  });
+
+  it("drops a private command reply when the connection changed during execution", async () => {
+    const ctx = makeGateCtx({});
+    ctx.lifecycleGeneration = 1;
+    const executed = deferred();
+    const reply = deferred<string>();
+    ctx.executeCommand = vi.fn(() => {
+      executed.resolve();
+      return reply.promise;
+    });
+
+    const pending = handleTextMessage.call(ctx, { ...makeMsg("!now"), targetMode: 1 });
+    await executed.promise;
+    ctx.lifecycleGeneration++;
+    reply.resolve("Prior connection's queue");
+    await pending;
+
+    expect(ctx.tsClient.sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("drops a command from a previous connection after the group check", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6] });
+    ctx.lifecycleGeneration = 1;
+    const groups = deferred<string[]>();
+    ctx.tsClient.getClientServerGroups.mockReturnValue(groups.promise);
+
+    const pending = handleTextMessage.call(ctx, { ...makeMsg("!stop"), targetMode: 1 });
+    expect(ctx.tsClient.getClientServerGroups).toHaveBeenCalled();
+    ctx.lifecycleGeneration++;
+    groups.resolve(["6"]);
+    await pending;
+
+    expect(ctx.executeCommand).not.toHaveBeenCalled();
+    expect(ctx.tsClient.sendTextMessage).not.toHaveBeenCalled();
+  });
+
+  it("routes permission denied and execution errors privately when triggered via DM", async () => {
+    const ctx = makeGateCtx({ adminGroups: [6], lookupGroups: [] });
+    const dmStop: TS3TextMessage = {
+      invokerName: "Guest",
+      invokerId: "22",
+      invokerUid: "uid-guest",
+      message: "!stop",
+      targetMode: 1,
+      invokerGroups: [],
+    };
+    await handleTextMessage.call(ctx, dmStop);
+    expect(ctx.tsClient.sendTextMessage).toHaveBeenCalledWith(COMMAND_DENIED_MESSAGE, 1, 22);
+
+    ctx.tsClient.sendTextMessage.mockClear();
+    const okCtx = makeGateCtx({ adminGroups: [] });
+    okCtx.executeCommand = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    await handleTextMessage.call(okCtx, { ...dmStop, message: "!play x" });
+    expect(okCtx.tsClient.sendTextMessage).toHaveBeenCalledWith("Error: boom", 1, 22);
+  });
+
+  it("wires connected, clientMoved, pluginCommand, and disconnected to openProtocol", () => {
+    const tsClient = new EventEmitter() as EventEmitter & {
+      getClientId(): number;
+    };
+    tsClient.getClientId = () => 99;
+    const openProtocol = {
+      scheduleAnnounce: vi.fn(),
+      handlePluginCommand: vi.fn(async () => {}),
+      reset: vi.fn(),
+    };
+    const ctx = {
+      tsClient,
+      openProtocol,
+      connected: true,
+      lifecycleGeneration: 0,
+      autoPaused: false,
+      idleTimer: null,
+      idlePollTimer: null,
+      jellyfinPollTimer: null,
+      snapshotTimer: null,
+      currentSourceIsSpotify: false,
+      disconnectEmitted: false,
+      _cancelIdleTimer: vi.fn(),
+      _startIdlePoller: vi.fn(),
+      _startJellyfinReportPoller: vi.fn(),
+      unregisterManagedVoiceClient: vi.fn(),
+      voiceDucking: { reset: vi.fn(), removeSpeaker: vi.fn(), handleVoiceActivity: vi.fn() },
+      spotifyController: { stop: vi.fn() },
+      player: { stop: vi.fn() },
+      jellyfinReporter: undefined,
+      queue: { clear: vi.fn() },
+      sweepLocalAudio: vi.fn(),
+      emit: vi.fn(),
+      refreshOccupancy: vi.fn(async () => {}),
+      _resumeIfReturning: vi.fn(),
+      profileManager: { onChannelMoved: vi.fn(async () => {}) },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    } as Record<string, any>;
+
+    (BotInstance.prototype as any).setupTsEvents.call(ctx);
+
+    tsClient.emit("connected");
+    expect(openProtocol.scheduleAnnounce).toHaveBeenCalledTimes(1);
+
+    tsClient.emit("clientMoved", { id: 5, targetChannelID: 10n });
+    expect(openProtocol.scheduleAnnounce).toHaveBeenCalledTimes(1);
+
+    tsClient.emit("clientMoved", { id: 99, targetChannelID: 10n });
+    expect(openProtocol.scheduleAnnounce).toHaveBeenCalledTimes(2);
+
+    const pluginCmd = {
+      name: "tsclient:commands",
+      data: JSON.stringify({ v: 1, action: "list_req" }),
+      invokerId: 5,
+      invokerName: "User",
+      invokerUid: "uid-user",
+    };
+    tsClient.emit("pluginCommand", pluginCmd);
+    expect(openProtocol.handlePluginCommand).toHaveBeenCalledWith(pluginCmd);
+
+    tsClient.emit("disconnected");
+    expect(openProtocol.reset).toHaveBeenCalledTimes(1);
   });
 });

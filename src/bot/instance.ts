@@ -3,15 +3,20 @@ import {
   TS3Client,
   escapeTS3,
   type TS3ClientOptions,
+  type TS3PluginCommand,
   type TS3TextMessage,
   type TS3VoiceActivity,
   type ClientInfo,
   type ClientMovedEvent,
   type TS3VoiceSendFailure,
 } from "../ts-protocol/client.js";
+import { OpenProtocolManager } from "../ts-protocol/open-protocol.js";
 import { AudioPlayer } from "../audio/player.js";
+import { blocksProviderForAdvance, resolveUrlWithRetry } from "./url-retry.js";
+import { RISK_CONTROL_CODE, RiskControlError, toPlayFailure } from "../music/provider.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
-import type { MusicProvider, Platform, Song } from "../music/provider.js";
+import type { MusicProvider, Platform, PlayFailure, Song, SongUrlResult } from "../music/provider.js";
+import { musicRequestError } from "../music/request-error.js";
 import {
   parseCommand,
   canRunCommand,
@@ -158,11 +163,27 @@ export interface BotStatus {
   effectiveDuration?: number;
 }
 
+async function sendTextReply(
+  tsClient: Pick<TS3Client, "sendTextMessage">,
+  msg: TS3TextMessage,
+  text: string,
+): Promise<void> {
+  if (msg.targetMode === 1) {
+    const targetClientId = Number(msg.invokerId);
+    if (Number.isInteger(targetClientId) && targetClientId > 0) {
+      await tsClient.sendTextMessage(text, 1, targetClientId);
+    }
+    return;
+  }
+  await tsClient.sendTextMessage(text);
+}
+
 export class BotInstance extends EventEmitter {
   readonly id: string;
   name: string;
 
   private tsClient: TS3Client;
+  private openProtocol: OpenProtocolManager;
   private player: AudioPlayer;
   private voiceDucking: VoiceDuckingController;
   private managedVoiceClients: ManagedVoiceClientRegistry;
@@ -202,13 +223,26 @@ export class BotInstance extends EventEmitter {
   private profileManager: BotProfileManager;
   private isFmMode = false;
   private fmProvider: MusicProvider | null = null;
+  private resolveFmProvider?: () => MusicProvider;
   private fmRequesterName: string | undefined;
   /** Results of the most recent !search, for "#N" selection (issue #90). */
   private lastSearchResults: Song[] = [];
+  private playbackRequest?: symbol;
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
+  /** Format metadata belongs to the selected queue entry and its current URL. */
+  private currentStream?: { song: QueuedSong; url: string; quality?: string; isTrial: boolean };
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
-  private streamRecovery: { song: QueuedSong; attempts: number; position: number; session: number; generation: number; pauseRequested: boolean; inFlight: boolean } | null = null;
+  private streamRecovery: {
+    song: QueuedSong;
+    attempts: number;
+    position: number;
+    session: number;
+    generation: number;
+    pauseRequested: boolean;
+    inFlight: boolean;
+    failedHosts: Set<string>;
+  } | null = null;
   private playGate: Promise<unknown> = Promise.resolve();
   /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
    *  null when the wired provider has no reporting capability. */
@@ -237,6 +271,14 @@ export class BotInstance extends EventEmitter {
     this.avatarStore = options.avatarStore;
 
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
+    this.openProtocol = new OpenProtocolManager({
+      transport: this.tsClient,
+      getConfig: () => ({
+        locale: this.config.locale,
+        commandPrefix: this.config.commandPrefix,
+      }),
+      logger: this.logger,
+    });
     this.player = new AudioPlayer(this.logger);
     this.voiceDucking = new VoiceDuckingController(
       this.player,
@@ -454,6 +496,12 @@ export class BotInstance extends EventEmitter {
       });
     });
 
+    this.tsClient.on("pluginCommand", (cmd: TS3PluginCommand) => {
+      this.openProtocol?.handlePluginCommand(cmd).catch((err) => {
+        this.logger.debug({ err }, "OpenProtocol plugin command handler failed");
+      });
+    });
+
     this.tsClient.on("disconnected", () => {
       // Always reset local state — covers the case where connect() never
       // completed (hanging handshake → 60s library idle timeout) and
@@ -461,6 +509,7 @@ export class BotInstance extends EventEmitter {
       // short-circuited on !this.connected, leaving player stuck as "playing".
       this.lifecycleGeneration++;
       this.connected = false;
+      this.openProtocol?.reset();
       this._cancelIdleTimer();
       this.unregisterManagedVoiceClient(MANAGED_VOICE_CLIENT_RELEASE_GRACE_MS);
       this.voiceDucking.reset(true);
@@ -504,6 +553,7 @@ export class BotInstance extends EventEmitter {
       this.tsClient.getDefaultChannelId().then((id) => {
         this.defaultChannelId = id;
       }).catch(() => {});
+      this.openProtocol?.scheduleAnnounce();
     });
 
     this.tsClient.on("voiceActivity", (activity: TS3VoiceActivity) => {
@@ -520,12 +570,10 @@ export class BotInstance extends EventEmitter {
     // React near-instantly to channel membership changes. The 30s idle
     // poller remains the fallback if any of these events are missed.
     //
-    // clientEnter additionally arms auto-RESUME directly from the event,
-    // because the occupancy query (clientlist) times out whenever another
-    // client is present — i.e. exactly when a listener returns — so it cannot
-    // be used to confirm the return. See _resumeIfReturning().
-    this.tsClient.on("clientEnter", () => {
-      this._resumeIfReturning();
+    // Enter and move events can confirm a listener's arrival even if the
+    // occupancy query fails. Only arrivals in this channel can resume playback.
+    this.tsClient.on("clientEnter", (event: { id: number; channelID: bigint }) => {
+      this._resumeIfReturning(event.id, event.channelID);
       void this.refreshOccupancy();
     });
     this.tsClient.on("clientLeave", (event: { id: number }) => {
@@ -554,8 +602,10 @@ export class BotInstance extends EventEmitter {
         this.profileManager.onChannelMoved(event.targetChannelID).catch((err) => {
           this.logger.warn({ err }, "Channel description move update failed");
         });
+        this.openProtocol?.scheduleAnnounce();
       } else {
         this.voiceDucking.removeSpeaker(event.id);
+        this._resumeIfReturning(event.id, event.targetChannelID);
       }
       void this.refreshOccupancy();
     });
@@ -601,20 +651,10 @@ export class BotInstance extends EventEmitter {
     }
   }
 
-  /**
-   * Resume playback when a listener returns after an auto-pause, driven by the
-   * clientEnter push event rather than a (timing-out) occupancy query.
-   *
-   * We only auto-pause while alone on the server, so `autoPaused` is a reliable
-   * "paused because empty" flag; any client appearing while it's set means a
-   * listener returned. Delegating to handleOccupancy(1) routes through
-   * decideOccupancyAction (resume iff autoPaused && paused) and also cancels the
-   * idle-disconnect timer. This path NEVER pauses — userCount is always > 0 —
-   * so a spurious or unrelated enter can only (harmlessly) resume, never stop
-   * playback. Pause remains exclusively on the authoritative clientlist path.
-   */
-  private _resumeIfReturning(): void {
-    if (!this.connected) return;
+  /** Resume an automatic pause after a listener arrives in the bot's channel. */
+  private _resumeIfReturning(listenerId: number, channelId: bigint): void {
+    if (!this.connected || listenerId <= 0 || listenerId === this.tsClient.getClientId() ||
+        channelId === 0n || channelId !== this.tsClient.getChannelId()) return;
     if (shouldResumeOnReturn(this.autoPaused, this.player.getState())) {
       this.handleOccupancy(1);
     }
@@ -866,6 +906,7 @@ export class BotInstance extends EventEmitter {
       this.disconnectEmitted = true;
       this.emit("disconnected");
     }
+    this.openProtocol?.reset();
     this.tsClient.disconnect();
     // Stop outbound PCM and initiate the TeamSpeak disconnect before removing
     // our id from the shared registry, minimizing the window in which another
@@ -993,13 +1034,19 @@ export class BotInstance extends EventEmitter {
     );
     if (!parsed) return;
 
-    if (!(await this.isCommandAllowed(parsed.name, msg))) {
+    // A numeric invoker ID only belongs to this TeamSpeak connection.
+    const generation = this.lifecycleGeneration;
+    const isCurrent = () => this.lifecycleGeneration === generation;
+    const allowed = await this.isCommandAllowed(parsed.name, msg);
+    if (!isCurrent()) return;
+
+    if (!allowed) {
       this.logger.info(
         { command: parsed.name, invoker: msg.invokerName },
         "Command denied: invoker not in adminGroups"
       );
       try {
-        await this.tsClient.sendTextMessage(COMMAND_DENIED_MESSAGE);
+        await sendTextReply(this.tsClient, msg, COMMAND_DENIED_MESSAGE);
       } catch (sendErr) {
         this.logger.error({ err: sendErr }, "Failed to send permission-denied message to chat");
       }
@@ -1017,15 +1064,15 @@ export class BotInstance extends EventEmitter {
         // A single long reply (e.g. full lyrics) would exceed TeamSpeak's
         // per-message byte cap, so split it and send the chunks in order.
         for (const chunk of splitTextIntoChunks(response)) {
-          await this.tsClient.sendTextMessage(chunk);
+          if (!isCurrent()) return;
+          await sendTextReply(this.tsClient, msg, chunk);
         }
       }
     } catch (err) {
+      if (!isCurrent()) return;
       this.logger.error({ err, command: parsed.name }, "Command execution error");
       try {
-        await this.tsClient.sendTextMessage(
-          `Error: ${(err as Error).message}`
-        );
+        await sendTextReply(this.tsClient, msg, `Error: ${(err as Error).message}`);
       } catch (sendErr) {
         this.logger.error({ err: sendErr }, "Failed to send error message to chat");
       }
@@ -1112,7 +1159,7 @@ export class BotInstance extends EventEmitter {
         return this.cmdStop();
       case "next":
       case "skip":
-        return this.cmdNext();
+        return (await this.skipToNext()).message;
       case "prev":
         return this.cmdPrev();
       case "vol":
@@ -1181,6 +1228,7 @@ export class BotInstance extends EventEmitter {
   private disableFmMode(): void {
     this.isFmMode = false;
     this.fmProvider = null;
+    this.resolveFmProvider = undefined;
     this.fmRequesterName = undefined;
   }
 
@@ -1222,55 +1270,122 @@ export class BotInstance extends EventEmitter {
     return requestedBy ? { ...song, requestedBy } : { ...song };
   }
 
-  /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
-  async resolveAndPlay(song: QueuedSong): Promise<boolean> {
+  /** Resolve the URL and start playback if this request still owns the queue. */
+  async resolveAndPlay(
+    song: QueuedSong,
+    onFailure?: (failure: PlayFailure) => void,
+    commitQueue?: () => void,
+  ): Promise<boolean> {
+    const request = Symbol();
+    this.playbackRequest = request;
+    const generation = this.lifecycleGeneration;
+    const current = this.queue.current();
+    const isCancelled = () => !this.connected || this.lifecycleGeneration !== generation ||
+      this.playbackRequest !== request || this.queue.current() !== current;
+    const fail = (message: string) => onFailure?.({
+      platform: song.platform,
+      songId: song.id,
+      code: "unknown",
+      message,
+    });
     if (!this.connected) {
-      this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
+      fail("机器人未连接");
       return false;
     }
     if (song.platform === "local" && !this.isLocalAudioEnabled()) {
-      this.logger.warn({ songId: song.id, name: song.name }, "Local audio playback disabled — refusing track");
+      fail("该机器人已关闭本地音频播放");
       return false;
     }
-    // Clear any accumulated skip votes — every fresh track starts with a
-    // clean slate, regardless of which code path loaded it (cmdPlay,
-    // cmdPlaylist, cmdAlbum, cmdFm, trackEnd auto-advance, etc.).
-    this.voteSkipUsers.clear();
-    const provider = this.getProviderFor(song.platform);
     try {
+      const provider = this.getProviderFor(song.platform);
       if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
-        const detail = await provider.getSongDetail(song.id);
-        if (detail) {
-          song.duration = detail.duration;
-          song.name = detail.name;
-          song.id = detail.id;
+        // Detail is metadata only (duration / canonical id). A failure here used
+        // to abort the whole resolve before the retry budget even started, so a
+        // transient 4xx turned into an instant 「无法播放」.
+        try {
+          const detail = await provider.getSongDetail(song.id);
+          if (isCancelled()) return false;
+          if (detail) {
+            song.duration = detail.duration;
+            song.name = detail.name;
+            song.id = detail.id;
+          }
+        } catch (err) {
+          this.logger.warn({ err, songId: song.id }, "Song detail lookup failed — continuing with queued metadata");
         }
       }
-      const result = await provider.getSongUrl(song.id);
-      if (!result?.url) {
-        this.logger.warn({ songId: song.id, name: song.name }, "No URL available, skipping");
-        return false;
-      }
-      // Re-check connection state AFTER the network round-trip — the URL
-      // resolve can take multiple seconds and the user may have called stop
-      // during that window. Without this, we'd spawn ffmpeg on a
-      // disconnected bot and land back in the same "connected=false but
-      // playing=true" inconsistency that Bug C was about.
-      if (!this.connected) {
-        this.logger.warn(
-          { songId: song.id, name: song.name },
-          "bot disconnected during URL resolve — aborting playback",
-        );
-        return false;
-      }
+      // Retries happen here (not in the provider) so every queue path — web
+      // click, chat !play, auto-advance, FM — shares the same budget. The
+      // policy lives in url-retry.ts so it is unit tested without a bot; a
+      // config without the field means 0 retries, i.e. the previous behaviour.
+      let selectedQuality: string | undefined;
+      const result = await resolveUrlWithRetry({
+        retries: this.config?.playUrlRetries,
+        resolve: (quality) => {
+          selectedQuality = quality;
+          return provider.getSongUrl(song.id, quality);
+        },
+        // NetEase's quality ladder is not continuous: a track can play at 192k
+        // while both 320k and 128k return null, so every lower level is tried.
+        // Providers without a quality knob return [] and keep one attempt.
+        fallbacks: provider.getFallbackQualities?.() ?? [],
+        // Stop / disconnect must abort the budget: retrying into a dead
+        // connection only delays the queue.
+        isCancelled,
+        onAttemptFailed: ({ attempt, total, quality, error }) => {
+          const fields = { songId: song.id, name: song.name, attempt, total, quality };
+          if (error instanceof RiskControlError) {
+            // -460 is NetEase refusing the IP, not this track. Say so, otherwise
+            // the log reads like the song is unavailable and people go hunting
+            // for a copyright problem that does not exist.
+            this.logger.warn(
+              { ...fields, code: RISK_CONTROL_CODE, reason: error.message },
+              "URL resolve hit NetEase risk control (-460) — backing off",
+            );
+          } else if (error) {
+            this.logger.warn({ ...fields, err: error }, "URL resolve attempt failed");
+          } else if (attempt < total) {
+            this.logger.debug(fields, "URL resolve returned no URL — retrying");
+          }
+        },
+        // Once per track, and with the reason named. The old log line was
+        // `No URL available` with no cause, which is what sent three separate
+        // investigations after a copyright problem that was never there.
+        onExhausted: ({ quality, error }) => {
+          const failure = error
+            ? toPlayFailure(provider.platform, song.id, error)
+            : {
+                platform: provider.platform,
+                songId: song.id,
+                code: "unknown" as const,
+                message: `没有拿到播放地址（${quality ?? "默认音质"}）`,
+              };
+          onFailure?.(failure);
+          this.logger.warn(
+            {
+              songId: song.id,
+              name: song.name,
+              platform: provider.platform,
+              code: failure.code,
+              quality: quality ?? "default",
+              upstream: failure.upstream,
+              reason: failure.message,
+            },
+            "No URL available, skipping",
+          );
+        },
+      });
+      if (!result?.url || isCancelled()) return false;
       // Stage 2: a `spotify:` sentinel URI means the go-librespot sidecar
       // serves the audio, NOT ffmpeg. Start the per-bot sidecar on demand; if
       // it can't run (disabled / non-Linux / binary missing) keep the Stage-1
       // fallback message + skip so the queue keeps moving.
       if (isSpotifyUri(result.url)) {
         const ready = await this.spotifyController.ensureStarted();
+        if (isCancelled()) return false;
         if (!ready) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify backend unavailable — skipping");
+          fail(SPOTIFY_UNAVAILABLE_MESSAGE);
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
           return false;
         }
@@ -1280,8 +1395,10 @@ export class BotInstance extends EventEmitter {
         // sidecar failed the play (dead/errored backend): never attach the
         // player to a dead stream — send the same fallback and skip.
         const played = await this.spotifyController.playTrack(result.url);
+        if (isCancelled()) return false;
         if (!played) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify playTrack failed — skipping");
+          fail(SPOTIFY_UNAVAILABLE_MESSAGE);
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
           return false;
         }
@@ -1298,7 +1415,8 @@ export class BotInstance extends EventEmitter {
         // frame counter is not reset, so player.getElapsed() over-reads for the
         // 2nd+ consecutive Spotify track. Cosmetic only — the authoritative
         // elapsed shown to users is status.track.position from the backend poll.
-        if (!this.player.isExternalActive()) {
+        if (commitQueue) this.player.resetFailures();
+        if (commitQueue || !this.player.isExternalActive()) {
           this.player.playPcmStream(this.spotifyController.getPcmStream(), {
             // The sidecar PCM pipe is long-lived; per-track end arrives via the
             // controller "trackEnded" WS event, not stream EOF. A real EOF here
@@ -1327,45 +1445,41 @@ export class BotInstance extends EventEmitter {
           this.player.resume();
         }
         this.currentSourceIsSpotify = true;
-        this.jellyfinReporter?.onStop();
-        song.url = result.url;
-        // No trial clip for Spotify — full-track duration only (the near-end
-        // stall watchdog is disabled for the external stream anyway).
+        // Spotify has no preview clip or URL stall watchdog.
         this.effectiveDuration = song.duration;
-        this.autoPaused = false;
-        this.database.addPlayHistory({
-          botId: this.id,
-          songId: song.id,
-          songName: song.name,
-          artist: song.artist,
-          album: song.album,
-          platform: song.platform,
-          coverUrl: song.coverUrl,
-          requestedBy: song.requestedBy,
-        });
-        await this.syncProfileToSong(song);
-        this.emit("stateChange");
-        return true;
-      }
-      // Non-Spotify track: if we were on Spotify, pause the sidecar so it stops
-      // decoding ahead before the URL ffmpeg reclaims the PCM buffer.
-      if (this.currentSourceIsSpotify) {
-        this.spotifyController.pause().catch((err) =>
-          this.logger.warn({ err }, "Failed to pause Spotify sidecar on source switch"));
-        this.currentSourceIsSpotify = false;
+      } else {
+        // Pause the sidecar before URL playback reclaims the PCM buffer.
+        if (this.currentSourceIsSpotify) {
+          this.spotifyController.pause().catch((err) =>
+            this.logger.warn({ err }, "Failed to pause Spotify sidecar on source switch"));
+          this.currentSourceIsSpotify = false;
+        }
+        if (commitQueue) this.player.resetFailures();
+        this.effectiveDuration = result.trialDuration ?? song.duration;
+        this.player.play(result.url, 0, this.effectiveDuration);
       }
       song.url = result.url;
-      // 试听片段用试听时长（让 player nearEnd 正确触发自动切歌）；完整曲回退 song.duration
-      this.effectiveDuration = result.trialDuration ?? song.duration;
-      this.player.play(result.url, 0, this.effectiveDuration);
-      // Jellyfin playback reporting: open a session for jellyfin tracks (the
-      // reporter closes the previous one itself); close any open session when
-      // playback moves to another source. Fire-and-forget — never blocks play.
+      this.currentStream = { song, url: result.url, quality: selectedQuality, isTrial: result.trialDuration !== undefined };
+    } catch (err) {
+      if (isCancelled()) return false;
+      this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
+      onFailure?.(toPlayFailure(song.platform, song.id, err));
+      return false;
+    }
+
+    // A direct play request commits its queue only after playback starts.
+    commitQueue?.();
+    this.voteSkipUsers.clear();
+    // Playback has started. Failures in bookkeeping must not skip a track
+    // or turn an otherwise successful playback request into an error.
+    this.autoPaused = false;
+    try {
       if (song.platform === "jellyfin") this.jellyfinReporter?.onTrackStart(song.id);
       else this.jellyfinReporter?.onStop();
-      // Fresh playback (re)start — clear auto-pause so a later occupancy
-      // change won't try to "resume" a track the user already restarted.
-      this.autoPaused = false;
+    } catch (err) {
+      this.logger.warn({ err, songId: song.id }, "Failed to report playback session");
+    }
+    try {
       this.database.addPlayHistory({
         botId: this.id,
         songId: song.id,
@@ -1376,29 +1490,25 @@ export class BotInstance extends EventEmitter {
         coverUrl: song.coverUrl,
         requestedBy: song.requestedBy,
       });
-      // Keep TeamSpeak-side profile updates on the same path for play/next/FM.
-      await this.syncProfileToSong(song);
-      this.emit("stateChange");
-      return true;
     } catch (err) {
-      this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
-      return false;
+      this.logger.warn({ err, songId: song.id }, "Failed to save play history");
     }
+    this.emit("stateChange");
+    // Profile uploads can outlive a short track. Let the queue advance while
+    // the profile manager's generation checks discard superseded updates.
+    void this.syncProfileToSong(song);
+    return true;
   }
 
-  /** Platforms whose CDN stream can die mid-file on long content (#89, #161). */
-  private static readonly RESUMABLE_PLATFORMS: ReadonlySet<Platform> = new Set(["bilibili"]);
+  private static readonly RESUMABLE_PLATFORMS: ReadonlySet<Platform> = new Set(["bilibili", "netease", "qq", "kugou"]);
   /** A track that ends within this many seconds of its duration ended normally. */
   private static readonly STREAM_END_TOLERANCE_S = 30;
   private static readonly MAX_STREAM_RESUMES = 3;
   private static readonly MAX_STREAM_URL_LOOKUPS = 3;
 
   /**
-   * Called when the player reports a track end. If a B站 stream ended long
-   * before its known duration, the CDN dropped it (#161): fetch a fresh URL
-   * and continue from where it stopped instead of skipping the rest of a
-   * 2-3 hour video. Gives up after MAX_STREAM_RESUMES attempts that make no
-   * real progress, so a truly broken stream still advances the queue.
+   * Renew an interrupted finite CDN stream and seek to the audio clock at EOF.
+   * The existing recovery budget bounds restarts that make no progress.
    *
    * Returns true when it handled the end (resumed, or a newer track has
    * already taken over), false when the caller should advance the queue.
@@ -1408,12 +1518,21 @@ export class BotInstance extends EventEmitter {
     if (!song || !this.connected || !BotInstance.RESUMABLE_PLATFORMS.has(song.platform)) {
       return false;
     }
+    const bilibili = song.platform === "bilibili";
+    const source = song.url ? URL.parse(song.url) : null;
+    const playback = this.currentStream?.song === song && this.currentStream.url === song.url
+      ? this.currentStream : undefined;
     const duration = this.effectiveDuration ?? song.duration;
-    const position = Math.floor(this.player.getElapsed());
+    const elapsed = this.player.getElapsed();
+    const position = bilibili ? Math.floor(elapsed) : elapsed;
     const endedSession = this.player.getPlaybackSessionId();
-    if (!(duration > 0) || duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
+    if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(position) || position < 0 ||
+        duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
       return false;
     }
+    // Music previews can start at a different offset than the full song.
+    if (!bilibili && (playback?.isTrial || position <= 0 ||
+        (source?.protocol !== "http:" && source?.protocol !== "https:"))) return false;
     if (this.player.getState() !== "idle") return true;
     const generation = this.lifecycleGeneration;
 
@@ -1425,7 +1544,10 @@ export class BotInstance extends EventEmitter {
       recovery.generation !== generation ||
       position - recovery.position > BotInstance.STREAM_END_TOLERANCE_S
     ) {
-      this.streamRecovery = { song, attempts: 0, position, session: endedSession, generation, pauseRequested: false, inFlight: false };
+      this.streamRecovery = {
+        song, attempts: 0, position, session: endedSession, generation,
+        pauseRequested: false, inFlight: false, failedHosts: new Set(),
+      };
     }
     const state = this.streamRecovery!;
     if (state.inFlight) return true;
@@ -1438,9 +1560,11 @@ export class BotInstance extends EventEmitter {
       return false;
     }
     state.position = position;
+    const failedHost = source?.hostname.replace(/\.$/, "");
+    if (bilibili && failedHost) state.failedHosts.add(failedHost);
 
     this.logger.warn(
-      { songId: song.id, position, duration, attempt: state.attempts + 1 },
+      { platform: song.platform, songId: song.id, position, duration, attempt: state.attempts + 1 },
       "Stream ended before the track did — resuming with a fresh URL",
     );
     state.inFlight = true;
@@ -1461,16 +1585,28 @@ export class BotInstance extends EventEmitter {
         let result: Awaited<ReturnType<MusicProvider["getSongUrl"]>> = null;
         let reason = "no-url";
         try {
-          result = await this.getProviderFor(song.platform).getSongUrl(song.id);
-        } catch {
+          result = await this.getProviderFor(song.platform).getSongUrl(
+            song.id, playback?.quality, bilibili ? { avoidHosts: state.failedHosts } : { refresh: true },
+          );
+        } catch (err) {
+          if (!isCurrent()) return cancelled();
+          if (blocksProviderForAdvance(toPlayFailure(song.platform, song.id, err).code)) return false;
           reason = "lookup-error";
         }
         // Skip, stop, reconnect, or a new playback session supersedes the lookup.
         if (!isCurrent()) return cancelled();
         if (result?.url) {
+          if (!bilibili) {
+            const stream = URL.parse(result.url);
+            if (result.trialDuration !== undefined || (stream?.protocol !== "http:" && stream?.protocol !== "https:")) {
+              this.logger.warn({ platform: song.platform, songId: song.id }, "Fresh URL cannot resume the full track");
+              return false;
+            }
+          }
           // Lookup retries do not consume the actual decoder resume budget.
           state.attempts++;
           song.url = result.url;
+          if (playback) playback.url = result.url;
           this.player.play(result.url, position, duration);
           state.session = this.player.getPlaybackSessionId();
           if (state.pauseRequested) this.player.pause();
@@ -1478,7 +1614,7 @@ export class BotInstance extends EventEmitter {
           return true;
         }
         this.logger.warn(
-          { platform: "bilibili", sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
+          { platform: song.platform, sessionId: endedSession, position, duration, lookupAttempt: lookup + 1, reason },
           "Fresh stream URL lookup failed",
         );
       }
@@ -1565,59 +1701,59 @@ export class BotInstance extends EventEmitter {
     const { song, error } = await this.resolvePlayQuery(cmd);
     if (error) return error;
     const song0 = song!;
-    const ok = await this.playSingleSong(song0, requesterName);
+    let failure: PlayFailure | undefined;
+    let currentTrackContinues = false;
+    const ok = await this.playSingleSong(song0, requesterName, (f, continues) => {
+      failure = f;
+      currentTrackContinues = !!continues;
+    });
     if (!ok) {
-      const d = await this.getAuthDiag(song0.platform as "netease" | "qq");
-      return `无法播放: ${song0.name}\n${d.status}\n${d.hint}`;
+      if (currentTrackContinues) {
+        return `Could not restart ${song0.name}. The current track is still playing: ${failure?.message ?? "unknown"}`;
+      }
+      return this.playFailureText(song0, failure);
     }
     return `Now playing: ${song0.name} - ${song0.artist}${await this.getTrialWarning(song0)}`;
   }
 
-  /**
-   * Play a single resolved song immediately, honoring config.playKeepsQueue:
-   *  - false (default): clear the queue and play only this song — today's
-   *    behavior. The prior track is stopped and released local uploads swept.
-   *  - true (and the queue is non-empty): insert the song after the current
-   *    track and jump to it (reusing addNext + playAt — no new queue logic), so
-   *    the rest of the queue survives and continues after it. FM auto-refill is
-   *    stopped (manual takeover), but existing queued songs are preserved.
-   *
-   * Shared by chat !play and the web /play-song route so the toggle decision
-   * lives in exactly one place (#119). Returns true if a track started playing.
-   */
-  async playSingleSong(song: QueuedSong, requesterName?: string): Promise<boolean> {
-    const s = this.withRequester(song, requesterName);
-    if (this.config.playKeepsQueue && !this.queue.isEmpty()) {
-      const insertedAt =
-        this.queue.getCurrentIndex() < 0
-          ? this.queue.size()
-          : this.queue.getCurrentIndex() + 1;
-      this.player.stop();
-      this.disableFmMode();
-      this.queue.addNext(s);
-      this.queue.playAt(insertedAt);
-      this.player.resetFailures();
-      // No sweep here: the queue is kept, so no local uploads were released.
-      return this.resolveAndPlay(this.queue.current()!);
-    }
-    // Legacy replace behavior (default).
+  /** Start the requested song before changing the queue or stopping FM. */
+  async playSingleSong(
+    song: QueuedSong,
+    requesterName?: string,
+    onFailure?: (failure: PlayFailure, currentTrackContinues?: boolean) => void,
+  ): Promise<boolean> {
+    const requested = this.withRequester(song, requesterName);
     const previous = this.queue.current();
-    if (previous && !this.isSameSong(previous, s)) {
-      this.player.stop();
+    const previousSession = this.isSameSong(previous, requested) ? this.player.getPlaybackSessionId() : undefined;
+    const keepQueue = this.config.playKeepsQueue && !this.queue.isEmpty();
+    let failure: PlayFailure | undefined;
+    const started = await this.resolveAndPlay(requested, reason => { failure = reason; }, () => {
+      this.disableFmMode();
+      if (keepQueue) {
+        const currentIndex = this.queue.getCurrentIndex();
+        const index = currentIndex < 0 ? this.queue.size() : currentIndex + 1;
+        this.queue.addNext(requested);
+        this.queue.playAt(index);
+      } else {
+        this.queue.clear();
+        this.queue.add(requested);
+        this.queue.play();
+      }
+    });
+    if (!started) {
+      const currentTrackContinues = previousSession !== undefined &&
+        this.queue.current() === previous && this.player.getPlaybackSessionId() === previousSession &&
+        this.player.getState() === "playing";
+      onFailure?.(failure ?? {
+        platform: song.platform,
+        songId: song.id,
+        code: "unknown",
+        message: "播放请求已取消",
+      }, currentTrackContinues);
+      return false;
     }
-    this.queue.clear();
-    this.disableFmMode();
-    this.queue.add(s);
-    this.queue.play();
-
-    // Reset failure counter on user-initiated play
-    this.player.resetFailures();
-    const ok = await this.resolveAndPlay(this.queue.current()!);
-    // Sweep AFTER the new song is queued+resolved: the replaced songs are no
-    // longer referenced (and get deleted), but the song — if it is the same
-    // local upload that was already playing — stays referenced and is preserved.
-    this.sweepLocalAudio("replaced");
-    return ok;
+    if (!keepQueue) this.sweepLocalAudio("replaced");
+    return true;
   }
 
   /**
@@ -1672,13 +1808,9 @@ export class BotInstance extends EventEmitter {
     if (wasIdle) {
       this.queue.playAt(this.queue.size() - 1);
       this.player.resetFailures();
-      const ok = await this.resolveAndPlay(this.queue.current()!);
+      const failure = await this.startTrackWithDiagnostics(this.queue.current());
       this.emit("stateChange");
-      if (!ok) {
-        const d = await this.getAuthDiag(s.platform as "netease" | "qq");
-        return `无法播放: ${s.name}\n${d.status}\n${d.hint}`;
-      }
-      return `Now playing: ${s.name} - ${s.artist}${await this.getTrialWarning(s)}`;
+      return failure ?? `Now playing: ${s.name} - ${s.artist}${await this.getTrialWarning(s)}`;
     }
 
     this.emit("stateChange");
@@ -1706,13 +1838,9 @@ export class BotInstance extends EventEmitter {
     if (wasIdle) {
       this.queue.playAt(insertedAt);
       this.player.resetFailures();
-      const ok = await this.resolveAndPlay(this.queue.current()!);
+      const failure = await this.startTrackWithDiagnostics(this.queue.current());
       this.emit("stateChange");
-      if (!ok) {
-        const d = await this.getAuthDiag(s.platform as "netease" | "qq");
-        return `无法播放: ${s.name}\n${d.status}\n${d.hint}`;
-      }
-      return `Now playing: ${s.name} - ${s.artist}`;
+      return failure ?? `Now playing: ${s.name} - ${s.artist}`;
     }
 
     this.emit("stateChange");
@@ -1777,12 +1905,16 @@ export class BotInstance extends EventEmitter {
     return "Stopped and queue cleared";
   }
 
-  private async cmdNext(): Promise<string> {
-    await this.playNext();
+  async skipToNext(): Promise<{ ok: boolean; message: string }> {
+    if (!this.connected) throw new Error("Bot is not connected to TeamSpeak");
+    if (this.isAdvancing) return { ok: false, message: "正在切歌，请稍后" };
+    let reason: string | undefined;
+    const started = await this.playNext(3, failure => { reason = failure.message; });
     const current = this.queue.current();
-    if (current)
-      return `Now playing: ${current.name} - ${current.artist}`;
-    return "Queue is empty";
+    if (started && current) {
+      return { ok: true, message: `Now playing: ${current.name} - ${current.artist}` };
+    }
+    return { ok: false, message: reason ?? (current ? "没有可播放的下一首" : "队列为空") };
   }
 
   private async cmdPrev(): Promise<string> {
@@ -1971,15 +2103,10 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    let ok = true;
-    if (first) ok = await this.resolveAndPlay(first);
+    const failure = await this.startTrackWithDiagnostics(first, "无法播放歌单", cmd.args);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    if (!ok) {
-      const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
-      return `无法播放歌单: ${cmd.args}\n${d.status}\n${d.hint}`;
-    }
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
+    return failure ?? `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdAlbum(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -2013,22 +2140,21 @@ export class BotInstance extends EventEmitter {
       this.queue.add(this.withRequester({ ...song, platform: provider.platform }, requesterName));
     }
     const first = this.queue.play();
-    let ok = true;
-    if (first) ok = await this.resolveAndPlay(first);
+    const failure = await this.startTrackWithDiagnostics(first, "无法播放专辑", cmd.args);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    if (!ok) {
-      const d = await this.getAuthDiag(first!.platform as "netease" | "qq");
-      return `无法播放专辑: ${cmd.args}\n${d.status}\n${d.hint}`;
-    }
-    return `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
+    return failure ?? `Loaded ${songs.length} songs. Now playing: ${first?.name ?? "unknown"}${first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdFm(cmd: ParsedCommand, requesterName?: string): Promise<string> {
     return this.startFm(this.getProvider(cmd.flags), requesterName);
   }
 
-  async startFm(provider: MusicProvider = this.neteaseProvider, requesterName?: string): Promise<string> {
+  async startFm(
+    provider: MusicProvider = this.neteaseProvider,
+    requesterName?: string,
+    resolveProvider?: () => MusicProvider,
+  ): Promise<string> {
     // Match the !fm chat-command guard: refuse before mutating the queue when
     // offline, so the web /fm route can't wipe the queue + flip into FM mode
     // while nothing can actually play.
@@ -2050,20 +2176,16 @@ export class BotInstance extends EventEmitter {
     this.queue.setMode(PlayMode.Random);
     this.isFmMode = true;
     this.fmProvider = provider;
+    this.resolveFmProvider = resolveProvider;
     this.fmRequesterName = requesterName?.trim() || undefined;
     this.player.resetFailures();
 
     const first = this.queue.play();
-    let ok = true;
-    if (first) ok = await this.resolveAndPlay(first);
+    const failure = await this.startTrackWithDiagnostics(first, "无法播放FM");
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    if (!ok) {
-      const d = await this.getAuthDiag("netease");
-      return `无法播放FM\n${d.status}\n${d.hint}`;
-    }
     const label = provider.platform === "qq" ? "QQ Radar FM" : "Personal FM";
-    return `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}${ok && first ? await this.getTrialWarning(first) : ""}`;
+    return failure ?? `${label} started: ${first?.name ?? "unknown"} - ${first?.artist ?? ""}${first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async cmdArtist(cmd: ParsedCommand, requesterName?: string): Promise<string> {
@@ -2093,29 +2215,30 @@ export class BotInstance extends EventEmitter {
     this.player.resetFailures();
 
     const first = this.queue.play();
-    let ok = true;
-    if (first) ok = await this.resolveAndPlay(first);
+    const failure = await this.startTrackWithDiagnostics(first, "无法播放", cmd.args);
     this.sweepLocalAudio("queue_replaced");
     this.emit("stateChange");
-    if (!ok) {
-      const d = await this.getAuthDiag(provider.platform as "netease" | "qq");
-      return `无法播放: ${cmd.args}\n${d.status}\n${d.hint}`;
-    }
-    return `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}${ok && first ? await this.getTrialWarning(first) : ""}`;
+    return failure ?? `Artist mode: ${cmd.args} — ${filtered.length} songs loaded. Now playing: ${first?.name ?? "unknown"}${first ? await this.getTrialWarning(first) : ""}`;
   }
 
   private async refillFm(): Promise<void> {
-    const provider = this.fmProvider;
-    if (!this.isFmMode || !provider?.getPersonalFm) return;
+    if (!this.isFmMode || !this.fmProvider) return;
+    const resolveProvider = this.resolveFmProvider;
     try {
+      const current = this.fmProvider;
+      const resolved = resolveProvider?.() ?? current;
+      // Keep a provider's FM cursor while its login remains unchanged.
+      const provider = resolved !== current && resolved.getCookie() !== current.getCookie() ? resolved : current;
+      this.fmProvider = provider;
+      if (!provider.getPersonalFm) return;
       const songs = await provider.getPersonalFm();
-      if (songs.length === 0) return;
+      if (!this.isFmMode || this.fmProvider !== provider || this.resolveFmProvider !== resolveProvider || songs.length === 0) return;
       for (const song of songs) {
         this.queue.add(this.withRequester({ ...song, platform: provider.platform }, this.fmRequesterName));
       }
       this.logger.debug({ count: songs.length, platform: provider.platform }, "FM queue refilled");
     } catch (err) {
-      this.logger.error({ err }, "Failed to refill FM queue");
+      this.logger.error({ err: musicRequestError(err) }, "Failed to refill FM queue");
     }
   }
 
@@ -2157,6 +2280,36 @@ export class BotInstance extends EventEmitter {
     if (!cmd.args) return "Usage: !move <channel name or ID>";
     await this.tsClient.joinChannel(cmd.args);
     return `Moved to channel: ${cmd.args}`;
+  }
+
+  /**
+   * Start a track for a chat command, returning the failure text (with the
+   * platform login diagnostic appended) or undefined when it started.
+   */
+  private async startTrackWithDiagnostics(
+    song: QueuedSong | null,
+    prefix = "无法播放",
+    label?: string,
+  ): Promise<string | undefined> {
+    if (!song) return "No track to play";
+    let failure: PlayFailure | undefined;
+    const started = await this.resolveAndPlay(song, (f) => { failure = f; });
+    if (started) return undefined;
+    return this.playFailureText(song, failure, prefix, label);
+  }
+
+  /** Combine the upstream PlayFailure reason with the fork's login diagnostic. */
+  private async playFailureText(
+    song: QueuedSong,
+    failure: PlayFailure | undefined,
+    prefix = "无法播放",
+    label?: string,
+  ): Promise<string> {
+    const name = label ?? song.name;
+    const base = failure?.message ? `${prefix}: ${name} — ${failure.message}` : `${prefix}: ${name}`;
+    if (song.platform !== "netease" && song.platform !== "qq") return base;
+    const d = await this.getAuthDiag(song.platform);
+    return `${base}\n${d.status}\n${d.hint}`;
   }
 
   // 查询平台登录/VIP 状态，返回诊断文字和针对性提示
@@ -2486,6 +2639,7 @@ export class BotInstance extends EventEmitter {
     if (st.isFmMode && st.fmPlatform) {
       this.isFmMode = true;
       this.fmProvider = this.getProviderFor(st.fmPlatform as Platform);
+      this.resolveFmProvider = undefined;
     }
     const current = this.queue.current();
     if (current) {
@@ -2549,24 +2703,54 @@ export class BotInstance extends EventEmitter {
    *
    * Returns true if a song actually started playing, false otherwise.
    */
-  async playNext(maxRetries = 3): Promise<boolean> {
+  async playNext(maxRetries = 3, onFailure?: (failure: PlayFailure) => void): Promise<boolean> {
     if (this.isAdvancing || !this.connected) return false;
     this.isAdvancing = true;
     let started = false;
+    const blockedProviders = new Set<string>();
+    const captureFailure = (failure: PlayFailure) => {
+      if (blocksProviderForAdvance(failure.code)) blockedProviders.add(failure.platform);
+      onFailure?.(failure);
+    };
+    const nextCandidate = (): QueuedSong | null => {
+      if (blockedProviders.size === 0) return this.queue.next();
+      const sequential = this.queue.getMode() === PlayMode.Sequential;
+      const currentIndex = this.queue.getCurrentIndex();
+      if (!this.queue.list().some((track, index) =>
+        (!sequential || index > currentIndex) && !blockedProviders.has(track.platform),
+      )) return null;
+      // Do not spend URL attempts on a blocked source. Allow for crossing a
+      // shuffle boundary, but always terminate in looping modes.
+      for (let i = 0; i < this.queue.size() * 2; i++) {
+        const candidate = this.queue.next();
+        if (!candidate || !blockedProviders.has(candidate.platform)) return candidate;
+      }
+      return null;
+    };
+    const generation = this.lifecycleGeneration;
+    const unchanged = (song: QueuedSong, request: symbol | undefined) =>
+      this.connected && this.lifecycleGeneration === generation &&
+      this.queue.current() === song && this.playbackRequest === request;
     try {
       if (this.player.getState() !== "idle") this.player.stop(true);
       this.voteSkipUsers.clear();
       const next = this.queue.next();
       if (next) {
-        started = await this.resolveAndPlay(next);
+        const playback = this.resolveAndPlay(next, captureFailure);
+        const request = this.playbackRequest;
+        started = await playback;
+        if (!started && !unchanged(next, request)) return false;
         if (!started) {
           for (let i = 0; i < maxRetries && this.connected; i++) {
-            const retry = this.queue.next();
+            const retry = nextCandidate();
             if (!retry) break;
-            if (await this.resolveAndPlay(retry)) {
+            const retryPlayback = this.resolveAndPlay(retry, captureFailure);
+            const retryRequest = this.playbackRequest;
+            if (await retryPlayback) {
               started = true;
               break;
             }
+            if (!unchanged(retry, retryRequest)) return false;
           }
         }
         if (!started) {
@@ -2582,7 +2766,10 @@ export class BotInstance extends EventEmitter {
           await this.refillFm();
           const refillNext = this.queue.next();
           if (refillNext) {
-            started = await this.resolveAndPlay(refillNext);
+            const refillPlayback = this.resolveAndPlay(refillNext, captureFailure);
+            const refillRequest = this.playbackRequest;
+            started = await refillPlayback;
+            if (!started && !unchanged(refillNext, refillRequest)) return false;
           }
           if (!started) {
             this.player.stop();

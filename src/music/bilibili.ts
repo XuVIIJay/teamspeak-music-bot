@@ -1,8 +1,10 @@
+import { normalizeCookie } from "./cookie-normalize.js";
 import { createHash } from "node:crypto";
 import axios, { type AxiosInstance } from "axios";
 import type {
   MusicProvider,
   Song,
+  SongUrlRequestOptions,
   SongUrlResult,
   Playlist,
   LyricLine,
@@ -51,26 +53,23 @@ const BILI_PCDN_HOST = /\.mcdn\.bilivideo\.cn$|\.szbdyd\.com$/i;
 
 /**
  * Pick the audio URL least likely to die mid-stream: the first upos/cos
- * mirror among baseUrl + backupUrl, else the baseUrl as before.
+ * mirror among baseUrl + backupUrl. When recovering, exhaust untried hosts
+ * before reusing a failed host whose newly signed URL may still work.
  */
 export function pickStableAudioUrl(stream: {
   baseUrl?: string;
   base_url?: string;
   backupUrl?: string[];
   backup_url?: string[];
-}): string | undefined {
+}, avoidHosts?: ReadonlySet<string>): string | undefined {
   const primary = stream.baseUrl ?? stream.base_url;
-  const candidates = [primary, ...(stream.backupUrl ?? stream.backup_url ?? [])].filter(
-    (u): u is string => typeof u === "string" && u.length > 0,
-  );
-  const stable = candidates.find((u) => {
-    try {
-      return !BILI_PCDN_HOST.test(new URL(u).hostname);
-    } catch {
-      return false;
-    }
-  });
-  return stable ?? primary;
+  const candidates = [primary, ...(stream.backupUrl ?? stream.backup_url ?? [])]
+    .filter((url): url is string => typeof url === "string" && url.length > 0)
+    .map((url) => ({ url, host: URL.parse(url)?.hostname.replace(/\.$/, "") }));
+  const stable = candidates.filter(({ host }) => host && !BILI_PCDN_HOST.test(host));
+  const isUntried = ({ host }: (typeof candidates)[number]) => host && !avoidHosts?.has(host);
+
+  return stable.find(isUntried)?.url ?? candidates.find(isUntried)?.url ?? stable[0]?.url ?? primary;
 }
 
 /**
@@ -361,7 +360,11 @@ export class BiliBiliProvider implements MusicProvider {
     return this.cidCache.get(key) ?? this.cidCache.get(`${bvid}?p=${page}`) ?? this.cidCache.get(bvid) ?? null;
   }
 
-  async getSongUrl(songId: string, _quality?: string): Promise<SongUrlResult | null> {
+  async getSongUrl(
+    songId: string,
+    _quality?: string,
+    options?: SongUrlRequestOptions,
+  ): Promise<SongUrlResult | null> {
     const { bvid, page } = parseBilibiliId(songId);
     const cid = await this.getCid(bvid, page);
     if (!cid) return null;
@@ -384,7 +387,7 @@ export class BiliBiliProvider implements MusicProvider {
         (b.bandwidth ?? 0) > (a.bandwidth ?? 0) ? b : a
       );
 
-      const biliUrl = pickStableAudioUrl(best);
+      const biliUrl = pickStableAudioUrl(best, options?.avoidHosts);
       return biliUrl ? { url: biliUrl } : null;
     } catch {
       return null;
@@ -461,7 +464,28 @@ export class BiliBiliProvider implements MusicProvider {
   }
 
   setCookie(cookie: string): void {
-    this.cookie = cookie;
+    this.cookie = normalizeCookie(cookie);
+  }
+
+  /**
+   * A view of the same provider logged in as another account (#164 follow-up):
+   * a web user's own B站 login instead of the bot's shared one. Mirrors
+   * NeteaseProvider.withCookie so the web layer can treat every platform the
+   * same way.
+   *
+   * The anonymous buvid3 identity and the WBI signing key are carried over —
+   * both are account-independent caches, and re-fetching them per request would
+   * add two extra round-trips to every search.
+   */
+  withCookie(cookie: string): BiliBiliProvider {
+    const view = new BiliBiliProvider();
+    view.quality = this.quality;
+    view.buvidCookie = this.buvidCookie;
+    view.buvidInitialized = this.buvidInitialized;
+    view.wbiMixinKey = this.wbiMixinKey;
+    view.wbiKeyFetchedAt = this.wbiKeyFetchedAt;
+    view.setCookie(cookie);
+    return view;
   }
 
   getCookie(): string {
