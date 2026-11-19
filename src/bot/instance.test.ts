@@ -2292,8 +2292,10 @@ describe("BotInstance — OpenProtocol & command routing", () => {
   it("wires connected, clientMoved, pluginCommand, and disconnected to openProtocol", () => {
     const tsClient = new EventEmitter() as EventEmitter & {
       getClientId(): number;
+      getDefaultChannelId(): Promise<bigint>;
     };
     tsClient.getClientId = () => 99;
+    tsClient.getDefaultChannelId = async () => 0n;
     const openProtocol = {
       scheduleAnnounce: vi.fn(),
       handlePluginCommand: vi.fn(async () => {}),
@@ -2324,6 +2326,8 @@ describe("BotInstance — OpenProtocol & command routing", () => {
       emit: vi.fn(),
       refreshOccupancy: vi.fn(async () => {}),
       _resumeIfReturning: vi.fn(),
+      _handleClientMoved: vi.fn(async () => {}),
+      _handleClientEnter: vi.fn(async () => {}),
       profileManager: { onChannelMoved: vi.fn(async () => {}) },
       logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     } as Record<string, any>;

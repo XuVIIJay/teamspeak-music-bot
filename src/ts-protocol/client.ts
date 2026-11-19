@@ -18,7 +18,7 @@ import {
   type ClientEnterEvent,
   type ClientEntry,
   type ClientLeaveEvent,
-  type ClientMovedEvent,
+  type ClientMovedEvent as SDKClientMovedEvent,
   type DisconnectedEvent,
   type FileUploadInfo,
   type PluginCommandEvent,
@@ -47,7 +47,7 @@ import {
 
 export { CODEC_OPUS_MUSIC } from "./voice.js";
 export type { ServerProtocol } from "./protocol-detect.js";
-export type { FileUploadInfo, ClientMovedEvent, PluginCommandTarget } from "@honeybbq/teamspeak";
+export type { FileUploadInfo, PluginCommandTarget } from "@honeybbq/teamspeak";
 
 /** Client-entered event with a plain numeric id, as emitted by TS3Client. */
 export interface ClientInfo {
@@ -56,6 +56,9 @@ export interface ClientInfo {
   channelID: bigint;
   uid?: string;
 }
+
+/** Client-moved event with a plain numeric id, as emitted by TS3Client. */
+export type ClientMovedEvent = SDKClientMovedEvent & { id: number };
 
 /** Escape a string for use in TS3 ServerQuery-style commands. */
 export function escapeTS3(str: string): string {
@@ -397,7 +400,7 @@ export class TS3Client extends EventEmitter {
       this.emit("clientLeave", { ...ev, id });
     });
 
-    sdkClient.on("clientMoved", (ev: ClientMovedEvent) => {
+    sdkClient.on("clientMoved", (ev: SDKClientMovedEvent) => {
       if (!isCurrent()) return;
       const id = Number(ev.clientID);
       this.logger.debug(
@@ -549,7 +552,7 @@ export class TS3Client extends EventEmitter {
   /** Get the server's default channel ID via raw ServerQuery. */
   async getDefaultChannelId(): Promise<bigint> {
     try {
-      const info = await this.client!.execCommandWithResponse("serverinfo");
+      const info = await this.execCommandWithResponse("serverinfo");
       const rawId = info[0]?.virtualserver_default_channel_id;
       if (rawId != null) return BigInt(rawId);
     } catch { /* fall through */ }
@@ -565,7 +568,7 @@ export class TS3Client extends EventEmitter {
   /** Discover the bot's actual channel ID by looking up its own record. */
   async getMyChannelId(): Promise<bigint> {
     if (!this.client) return 0n;
-    const id = this.client.channelID();
+    const id = this.client.channelID;
     if (id !== 0n) return id;
     try {
       const allClients = await listClients(this.client);
@@ -600,7 +603,7 @@ export class TS3Client extends EventEmitter {
   async getServerName(): Promise<string> {
     if (!this.client) return this.options.host;
     try {
-      const result = await this.client.execCommandWithResponse("serverinfo");
+      const result = await this.execCommandWithResponse("serverinfo");
       return result[0]?.virtualserver_name || this.options.host;
     } catch {
       return this.options.host;
