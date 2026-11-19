@@ -1873,6 +1873,9 @@ describe("cmdPlaylist with a playlist link (#160)", () => {
       disableFmMode: vi.fn(),
       withRequester: (s: any) => s,
       resolveAndPlay: vi.fn(async () => true),
+      startTrackWithDiagnostics: (BotInstance.prototype as any).startTrackWithDiagnostics,
+      playFailureText: (BotInstance.prototype as any).playFailureText,
+      getAuthDiag: vi.fn(async () => ({ status: "", hint: "" })),
       sweepLocalAudio: vi.fn(),
       getTrialWarning: vi.fn(async () => ""),
       emit: vi.fn(),
@@ -1900,7 +1903,7 @@ describe("cmdPlaylist with a playlist link (#160)", () => {
   it("reports a refused first track instead of announcing playback", async () => {
     const ctx = makeCtx();
     ctx.resolveAndPlay.mockResolvedValue(false);
-    expect(await cmdPlaylist.call(ctx, cmd("2829883282"))).toBe("Cannot play: Song");
+    expect(await cmdPlaylist.call(ctx, cmd("2829883282"))).toMatch(/^无法播放歌单: 2829883282/);
   });
 
   it("checks the link's platform is enabled", async () => {
@@ -2293,8 +2296,10 @@ describe("BotInstance — OpenProtocol & command routing", () => {
   it("wires connected, clientMoved, pluginCommand, and disconnected to openProtocol", () => {
     const tsClient = new EventEmitter() as EventEmitter & {
       getClientId(): number;
+      getDefaultChannelId(): Promise<bigint>;
     };
     tsClient.getClientId = () => 99;
+    tsClient.getDefaultChannelId = async () => 0n;
     const openProtocol = {
       scheduleAnnounce: vi.fn(),
       handlePluginCommand: vi.fn(async () => {}),
@@ -2325,6 +2330,8 @@ describe("BotInstance — OpenProtocol & command routing", () => {
       emit: vi.fn(),
       refreshOccupancy: vi.fn(async () => {}),
       _resumeIfReturning: vi.fn(),
+      _handleClientMoved: vi.fn(async () => {}),
+      _handleClientEnter: vi.fn(async () => {}),
       profileManager: { onChannelMoved: vi.fn(async () => {}) },
       logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     } as Record<string, any>;

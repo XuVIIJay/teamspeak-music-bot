@@ -755,7 +755,7 @@ export class BotInstance extends EventEmitter {
       return;
     }
     const myChannelId = await this.tsClient.getMyChannelId();
-    let enteredChannelId = event.targetChannelID;
+    let enteredChannelId: bigint = event.targetChannelID;
 
     // 如果底层库返回 0，通过 listClients 查找用户实际所在频道
     if (enteredChannelId === 0n) {
